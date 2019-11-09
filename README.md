@@ -1,5 +1,5 @@
 # iotSvc
-
+```json
 {
     "Port":         "0092",
 	"MqttUp":       "iotIn/#",
@@ -9,3 +9,4 @@
     "Database":     "user:pwd@tcp(ip:3306)/db",
     "Database2":    "user:pwd!@tcp(ip:3306)/db"
 }
+```
