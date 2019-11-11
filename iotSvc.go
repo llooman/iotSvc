@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
 	"github.com/tkanos/gonfig"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -41,9 +42,8 @@ var props map[int]*iot.IotProp
 var nodes map[int]*iot.IotNode
 
 var wwwRoot string
-// var iotSvc string
 
- 
+// var iotSvc string
 
 var database *sql.DB
 var database2 *sql.DB
@@ -59,31 +59,31 @@ var chint *iot.IotNode
 var test *iot.IotNode
 var afzuiging *iot.IotNode
 
- 
-
 var mqttClient mqtt.Client
 
-
 type IotConfig struct {
-    Port       	string
-	MqttUp  	string
-	MqttCmd 	string
-	MqttDown 	string
-    MqttUri 	string
-    Database 	string
-	Database2 	string
- 
+	Port      string
+	MqttUp    string
+	MqttCmd   string
+	MqttDown  string
+	MqttUri   string
+	Database  string
+	Database2 string
+	IotSvcOld string
 }
+
+var raspbian3 iot.IotConn
+
 var iotConfig IotConfig
 
- 
+// var iotSvcConn net.Conn
 
 func init() {
- 
+
 }
 
 func main() {
- 
+
 	err := gonfig.GetConf(iot.Config(), &iotConfig)
 	if err != nil {
 		fmt.Printf("Config %s not found\n", iot.Config())
@@ -152,20 +152,13 @@ func main() {
 		persistNodeMem(nod)
 	}
 
-	// for _, prop := range props {
-	// 	// fmt.Println("k:", k, "v:", v)
-	// 	persistProp(prop)
-	// }
-
 	mqttUri, err := url.Parse(iotConfig.MqttUri)
 	checkError(err)
 
 	// topic := "node/+/global"
 
 	opts := mqtt.NewClientOptions()
-	// opts.AddBroker(fmt.Sprintf("%s://%s:%s", "tcp", "localhost","1883"))
 	opts.AddBroker(mqttUri.String())
-
 	//opts.SetClientID("test-clientID")		// Multiple connections should use different clientID for each connection, or just leave it blank
 	opts.SetKeepAlive(time.Second * time.Duration(60))
 
@@ -183,25 +176,28 @@ func main() {
 		// logger.Fatalf("Fail to connect broker, %v",token.Error())
 	}
 
+	raspbian3 = iot.IotConn{
+		Service:        iotConfig.IotSvcOld,
+		Protocol:       "tcp",
+		ConnectTimeout: 3,
+		ReadTimeout:    3,
+		PingInterval:   21,
+		Silent:         true,
+	}
+
+	// _, errr = TestConn(iotSvcConn, "")
+	// checkError(errr)
+
 	go mqListenUp(mqttUri, iotConfig.MqttUp)
 	go mqListenCmd(mqttUri, iotConfig.MqttCmd)
 
 	if runtime.GOOS == "windows" {
-		err = startIotService("localhost:"+ iotConfig.Port )
+		err = startIotService("localhost:" + iotConfig.Port)
 	} else {
-		err = startIotService("0.0.0.0:"+iotConfig.Port)
+		err = startIotService("0.0.0.0:" + iotConfig.Port)
 	}
 	checkError(err)
 
- 
-
-	// myClient, errr := connect("localhost:9092")
-	// checkError(errr)
-
-	// iotResponse, errr := iotCommand(myClient, `{"cmd":"timedata","id":541,"start":1567807200,"stop":1567893600}`) // "mvcdata&node&5"  master graphs
-	// checkError(errr)
-
-	// fmt.Println("myClient.iotResponse=" + string(iotResponse))
 	reader := bufio.NewReader(os.Stdin)
 	// scanner := bufio.NewScanner(os.Stdin)
 
@@ -520,7 +516,7 @@ func loadNodeValuesFromDB(table string) {
 
 func getProp(nodeID int, propID int) *iot.IotProp {
 
-	return prop(nodeID*iot.IDFactor+ propID)
+	return prop(nodeID*iot.IDFactor + propID)
 }
 
 func prop(varID int) *iot.IotProp {
@@ -552,7 +548,7 @@ func prop(varID int) *iot.IotProp {
 
 func createProp(node *iot.IotNode, propID int, name string, decimals int, refreshRate int, logOpt int, traceOpt int, globalMvc bool) *iot.IotProp {
 
-	varID := propID + node.NodeId * iot.IDFactor
+	varID := propID + node.NodeId*iot.IDFactor
 
 	props[varID] = &iot.IotProp{
 		NodeId:      node.NodeId,
@@ -595,6 +591,9 @@ func getNode(nodeID int) *iot.IotNode {
 		nodes[nodeID] = &iot.IotNode{
 			NodeId: nodeID,
 			Name:   "iot"}
+
+		createProp(nodes[nodeID], 20, "thuis", 0, 3600, 0, 0, true)
+		createProp(nodes[nodeID], 21, "vakantie", 0, 3600, 0, 0, true)
 
 		// pPomp := createProp(nodes[nodeID], 13, "pomp", 0, 60, 1, 0, true)
 		// createTemp(nodes[nodeID], 20, "aanvoer", 2)
@@ -728,7 +727,7 @@ func getNode(nodeID int) *iot.IotNode {
 		nodes[nodeID] = &iot.IotNode{
 			NodeId: nodeID,
 			Name:   "serial1"}
-		createProp(nodes[nodeID], 12, "temp", 2, 60, 0, 0, true) 
+		createProp(nodes[nodeID], 12, "temp", 2, 60, 0, 0, true)
 		return nodes[nodeID]
 
 	} else if nodeID == 14 {
@@ -845,65 +844,14 @@ func mqListenCmd(uri *url.URL, topic string) {
 
 		var payload = string(msg.Payload())
 		// fmt.Printf("[%s]>%s\n", topic, payload)
-		iotPayload := iot.ToIotPayload(payload)
+		iotPayload := iot.ToPayload(payload)
 
-		// fmt.Printf("* cmd %s VarId %d ConnId %d Val %d Timestamp %d\n", iotPayload.Cmd, iotPayload.VarId, iotPayload.ConnId, iotPayload.Val, iotPayload.Timestamp)
+		//command(&iotPayload)
+
+		fmt.Printf("* cmd %s VarId %d ConnId %d Val %d Timestamp %d\n", iotPayload.Cmd, iotPayload.VarId, iotPayload.ConnId, iotPayload.Val, iotPayload.Timestamp)
 
 		// TODO update timestamp conn node so we know it is still alive
 
-		if iotPayload.Cmd == "s" || iotPayload.Cmd == "S" {
-
-			if iotPayload.NodeId == 2 {
-				prop := prop(iotPayload.VarId)
-				prop.MemDirty = true
-				prop.IsNew = false
-				if prop.Decimals >= 0 {
-					prop.Val = iotPayload.Val
-				} else {
-					//	prop.ValString
-				}
-				prop.ValStamp = time.Now().Unix()
-				prop.Node.Timestamp = time.Now().Unix()
-				prop.Node.ConnId = iotPayload.ConnId
-
-			} else {
-				fmt.Printf("down %s [%s]\n", payload, msg.Topic())
-				token := mqttClient.Publish(iotConfig.MqttDown, byte(0), false, payload)
-				if token.Wait() && token.Error() != nil {
-					fmt.Printf("error %s [%s]\n", payload, msg.Topic())
-					fmt.Printf("Fail to publish, %v", token.Error())
-				}
-
-			}
-
-		} else if iotPayload.Cmd == "r" || iotPayload.Cmd == "R" {
-
-			// wellicht niet nodig hier omdat de Refresh logica het zelf op de down queue kan zetten
-
-			if iotPayload.NodeId == 2 {
-				// prop := prop(iotPayload.VarId)
-				// prop.Dirty = true
-				// prop.IsNew = false
-
-				// prop.Val = iotPayload.Val
-				// prop.ValStamp = time.Now().Unix()
-				// prop.Node.Timestamp = time.Now().Unix()
-				// prop.Node.ConnId = iotPayload.ConnId
-
-			} else {
-				fmt.Printf("down %s [%s]\n", payload, msg.Topic())
-				token := mqttClient.Publish(iotConfig.MqttDown, byte(0), false, payload)
-				if token.Wait() && token.Error() != nil {
-					fmt.Printf("error %s [%s]\n", payload, msg.Topic())
-					fmt.Printf("Fail to publish, %v", token.Error())
-				}
-
-			}
-
-		} else {
-			fmt.Printf("skip %s [%s]\n", payload, msg.Topic())
-
-		}
 	})
 }
 
@@ -918,32 +866,32 @@ func mqListenUp(uri *url.URL, topic string) {
 		var payload = string(msg.Payload())
 		//fmt.Printf("[%s]>%s", topic, payload)
 
-		iotPayload := iot.ToIotPayload(payload)
+		iotPayload := iot.ToPayload(payload)
 
 		//fmt.Printf("* cmd %s NodeId %d PropId %d VarId %d ConnId %d Val %d Timestamp %d\n", rsp.Cmd, rsp.NodeId, rsp.PropId, rsp.VarId, rsp.ConnId, rsp.Val, rsp.Timestamp)
 
 		if iotPayload.Cmd == "u" || iotPayload.Cmd == "U" {
 
 			prop := prop(iotPayload.VarId)
-			
+
 			// if(!domo.nodesInitialized){
-			// 	domo.logger.error("uploadVal: !domo.nodesInitialized for updateVal "+iotMsg._payload);			
+			// 	domo.logger.error("uploadVal: !domo.nodesInitialized for updateVal "+iotMsg._payload);
 			// }
-					
+
 			//sensor.onUpdate
-			//if( ! node.uploadVal(this, iotMsg) )return; 
+			//if( ! node.uploadVal(this, iotMsg) )return;
 
 			if prop.ValStamp > iotPayload.Timestamp {
 				fmt.Printf(`up err: timestamp < prop.timestamp for %d\n`, prop.VarId)
 			}
-	
+
 			if prop.Val == iotPayload.Val &&
-			   prop.ValStamp == iotPayload.Timestamp {
-				return // skip if duplicate messages because they cause trouble add-options for optimization 
-			}			
-			
-			// additional check like min and max val or max delta 
-	 
+				prop.ValStamp == iotPayload.Timestamp {
+				return // skip if duplicate messages because they cause trouble add-options for optimization
+			}
+
+			// additional check like min and max val or max delta
+
 			// node.active = true;
 			prop.Node.Dirty = true
 			prop.Node.Timestamp = time.Now().Unix()
@@ -951,23 +899,23 @@ func mqListenUp(uri *url.URL, topic string) {
 			if prop.PropId == 0 || prop.PropId == 1 {
 				prop.Node.BootStamp = time.Now().Unix()
 			}
- 				  
+
 			// node.persistMem();
 
 			// //if(id==1485) logger.info("uploadVal.1485: retryCount = 0 ");
 			updateLogItemSucces := false
 
 			if prop.LogOption > 0 &&
-			   prop.PrevStamp > 0{
+				prop.PrevStamp > 0 {
 
 				insertLogItem := false
 
 				if prop.Val == iotPayload.Val &&
-				   prop.Val == prop.Prev {
-					fmt.Printf(" update logItem %d, %d, %d\n",prop.VarId, iotPayload.Val, iotPayload.Timestamp  )
+					prop.Val == prop.Prev {
+					// fmt.Printf(" update logItem %d, %d, %d\n",prop.VarId, iotPayload.Val, iotPayload.Timestamp  )
 					updateLogItemSucces = updateLogItem(prop, iotPayload.Val, iotPayload.Timestamp)
 
-				} else if prop.LogOption > 1{
+				} else if prop.LogOption > 1 {
 					// if extrapolate 1 and 2 to 3. When 3 comes close then skip 2=the middle one
 					partialTimeSpan := float64(prop.ValStamp - prop.PrevStamp)
 					totalTimeSpan := float64(iotPayload.Timestamp - prop.PrevStamp)
@@ -981,16 +929,16 @@ func mqListenUp(uri *url.URL, topic string) {
 					}
 
 				} else {
-					insertLogItem = true	
+					insertLogItem = true
 				}
 
-				if insertLogItem || !updateLogItemSucces{
-					fmt.Printf(" append logItem %d, %d, %d\n",prop.VarId, iotPayload.Val, iotPayload.Timestamp  )
+				if insertLogItem || !updateLogItemSucces {
+					// fmt.Printf(" append logItem %d, %d, %d\n",prop.VarId, iotPayload.Val, iotPayload.Timestamp  )
 					appendLogItem(prop, iotPayload.Val, iotPayload.Timestamp)
 				}
-			}	
+			}
 
-			if ! updateLogItemSucces{
+			if !updateLogItemSucces {
 				prop.Prev = prop.Val
 				prop.PrevStamp = prop.ValStamp
 			}
@@ -1004,18 +952,18 @@ func mqListenUp(uri *url.URL, topic string) {
 			// {
 			// 	status = - status;
 			// }
-			// implement tracing  
-					
+			// implement tracing
+
 			// onChange(iotMsg.val,  iotMsg.timestamp);
 
 			prop.MemDirty = true
- 
+
 			prop.IsNew = false
-			if iotPayload.Timestamp > prop.Node.Timestamp{
+			if iotPayload.Timestamp > prop.Node.Timestamp {
 				prop.Node.Timestamp = iotPayload.Timestamp
-				prop.Node.ConnId = iotPayload.ConnId	
+				prop.Node.ConnId = iotPayload.ConnId
 				prop.Node.Dirty = true
-			} 	
+			}
 			prop.InErr = false
 
 			persistPropMem(prop)
@@ -1033,7 +981,7 @@ func mqListenUp(uri *url.URL, topic string) {
 
 			persistPropMem(prop)
 
-		// } else if iotPayload.Cmd == "S" || iotPayload.Cmd == "s" {
+			// } else if iotPayload.Cmd == "S" || iotPayload.Cmd == "s" {
 			// should be gone when cmd queue is operational
 		} else {
 			fmt.Printf("skip %s [%s]\n", payload, msg.Topic())
@@ -1042,7 +990,7 @@ func mqListenUp(uri *url.URL, topic string) {
 	})
 }
 
-func appendLogItem(prop *iot.IotProp, newVal int64, timeStamp int64  ) bool {  
+func appendLogItem(prop *iot.IotProp, newVal int64, timeStamp int64) bool {
 
 	append, err := database2.Prepare(`
 	INSERT INTO logMem( varid, stamp, val, delta ) VALUES(?, ?, ?, ?) 
@@ -1055,9 +1003,8 @@ func appendLogItem(prop *iot.IotProp, newVal int64, timeStamp int64  ) bool {
 		return false
 	}
 
-	delta := newVal - prop.Val 
+	delta := newVal - prop.Val
 	_, err = append.Exec(prop.VarId, timeStamp, newVal, delta, newVal, delta)
-
 
 	if err != nil {
 		fmt.Printf("appendLogItem.err: %v\n", err.Error())
@@ -1067,7 +1014,7 @@ func appendLogItem(prop *iot.IotProp, newVal int64, timeStamp int64  ) bool {
 	return true
 }
 
-func updateLogItem(prop *iot.IotProp, newVal int64, newTimeStamp int64) bool {   
+func updateLogItem(prop *iot.IotProp, newVal int64, newTimeStamp int64) bool {
 
 	update, err := database2.Prepare(`Update logMem set stamp = ?, val = ?, delta = ? where varid = ? and stamp = ?`)
 
@@ -1077,25 +1024,20 @@ func updateLogItem(prop *iot.IotProp, newVal int64, newTimeStamp int64) bool {
 		fmt.Printf("updateLogItem.err: %v\n", err.Error())
 		return false
 	}
-	
-	delta := newVal - prop.Val 
-	_, err = update.Exec( newTimeStamp, newVal, delta, prop.VarId, prop.ValStamp )
-		
+
+	delta := newVal - prop.Val
+	_, err = update.Exec(newTimeStamp, newVal, delta, prop.VarId, prop.ValStamp)
+
 	if err != nil {
 		fmt.Printf("updateLogItem.err: %v\n", err.Error())
 		return false
 	}
-	return true	
+	return true
 }
-
- 
-
 
 // func onPropNewVal(prop *iot.IotProp, iotPayload){
 
 // }
-
- 
 
 func persistNodeDef(node *iot.IotNode) {
 
@@ -1232,7 +1174,6 @@ func persistPropDef(prop *iot.IotProp) {
 
 func persistPropMem(prop *iot.IotProp) {
 
-
 	persist, err := database2.Prepare(`
 	INSERT INTO propsMem( varid, 
 		val, 
@@ -1355,12 +1296,12 @@ func handleIotServiceRequest(conn net.Conn) {
 
 	var payload string
 	var iotPayload iot.IotPayload
-	var cmd = "startServiceLoop"
+	var svcLoop = "startServiceLoop"
 	var nulByte = make([]byte, 0)
 
 	defer conn.Close() // close connection before exit
 
-	for cmd != "stop" {
+	for svcLoop != "stop" {
 
 		conn.SetReadDeadline(time.Now().Add(49 * time.Second)) // 49
 
@@ -1372,31 +1313,158 @@ func handleIotServiceRequest(conn net.Conn) {
 				return
 			}
 
-			fmt.Println("iot read err:", err.Error())
+			fmt.Printf("iot read err:%v\n", err.Error())
 			return
 		}
 
 		payload = strings.TrimSpace(string(buff[0:n]))
-		iotPayload = iot.ToIotPayload(payload)
+		iotPayload = iot.ToPayload(payload)
 
-		fmt.Printf("payload:%s\niotPayload:%+v\n\n", payload, iotPayload)
+		// fmt.Printf("iotSvc.payload<%s\niotPayload:%+v\n\n", payload, iotPayload)
+		fmt.Printf("iotSvc.payload<%s\n", payload)
 
-		if iotPayload.Cmd == "ping" {
-			fmt.Printf("pong\n")
-			conn.Write([]byte(fmt.Sprintf(`{"retcode":0,"message":"pong"}`)))
+		switch iotPayload.Cmd {
 
-		} else if iotPayload.Cmd == "mvcdata" {
-			mvcData(conn, &iotPayload)
-
-		} else if iotPayload.Cmd == "close" || iotPayload.Cmd == "stop" {
-			cmd = "stop"
+		case "close", "stop":
+			svcLoop = "stop"
 			conn.Write(nulByte)
 
+		default:
+			commandAndRespond(&iotPayload, conn)
+		}
+	}
+}
+
+func command(iotPayload *iot.IotPayload) string {
+
+	fmt.Printf("command: %v\n", iotPayload)
+
+	switch iotPayload.Cmd {
+
+	case "ping":
+		fmt.Printf("pong\n")
+		if iotPayload.IsJson {
+			return fmt.Sprintf(`{"retcode":0,"message":"pong"}`)
 		} else {
-			conn.Write([]byte(fmt.Sprintf(`{"retcode":99,"message":"cmd %s not found"}`, iotPayload.Cmd)))
+			return fmt.Sprintf(`pong`)
 		}
 
+	case "active", "sample", "s02", "s50", "led", "sensors", "mvcNode", "mvcSensor":
+		//logger.info("------------- active 2="+parm2+" 3="+parm3+"  --------------" );
+		// active = parm1.equalsIgnoreCase("true");
+		fmt.Printf("command: skip %v ", iotPayload.Parms)
+		return fmt.Sprintf(`{"retcode":0,"message":"command: skip %v"}`, iotPayload.Parms)
+
+	case "logDel": // trace delete
+		// //		 		logger.info("------ action logDel "+device );
+		// 			domo.db.executeUpdate("delete from domoTrace where van ="+nodeId);
+		// 			domo.db.executeUpdate("delete from domoTraceMem where van ="+nodeId );
 	}
+
+	if iotPayload.NodeId == 2 || iotPayload.NodeId == 0 {
+		return localCommand(iotPayload)
+	}
+
+	switch iotPayload.Cmd {
+
+	case "S", "R", "O", "N", "B", "T", "b":
+		down(iotPayload)
+
+	default:
+		return fmt.Sprintf(`{"retcode":99,"message":"cmd %s not found"}`, iotPayload.Cmd)
+	}
+
+	return fmt.Sprintf(`{"retcode":0,"message":"cmd %s"}`, iotPayload.Cmd)
+}
+
+// [iotOut/11] {S,4,52,1,55}
+func down(iotPayload *iot.IotPayload) {
+
+	prop := prop(iotPayload.VarId)
+	if prop.Node.ConnId < 1 {
+		fmt.Printf("down.err: connId < 1 for %v\n", iotPayload)
+
+	} else {
+		topic := iotConfig.MqttDown + "/" + strconv.Itoa(prop.Node.ConnId)
+		payload := fmt.Sprintf("{%s,%d,%d,1,%d}", iotPayload.Cmd, iotPayload.NodeId, iotPayload.PropId, iotPayload.Val)
+		//fmt.Printf("down %s [%s]\n", payload, topic)
+		token := mqttClient.Publish(topic, byte(0), false, payload)
+		if token.Wait() && token.Error() != nil {
+			fmt.Printf("error %s [%s]\n", payload, iotConfig.MqttDown)
+			fmt.Printf("Fail to publish, %v", token.Error())
+		}
+	}
+}
+
+func localCommand(iotPayload *iot.IotPayload) string {
+
+	// fmt.Printf("localCommand: %v\n", iotPayload)
+
+	switch iotPayload.Cmd {
+
+	case "S":
+		prop := prop(iotPayload.VarId) // test exist ???
+
+		if prop.Val == iotPayload.Val &&
+			prop.ValStamp == iotPayload.Timestamp &&
+			iotPayload.Timestamp > 0 {
+
+			fmt.Printf("localCommand:skip equal update\n")
+			return fmt.Sprintf(`{"retcode":0,"message":"varId %d duplicate Set"}`, iotPayload.VarId)
+		}
+
+		if prop.ValStamp > iotPayload.Timestamp &&
+			iotPayload.Timestamp > 0 {
+
+			fmt.Printf("localCommand:skip new timestamp to old!\n")
+			return fmt.Sprintf(`{"retcode":0,"message":"varId %d skip Set aged Set"}`, iotPayload.VarId)
+		}
+
+		prop.MemDirty = true
+		prop.IsNew = false
+		if prop.Decimals >= 0 {
+			prop.Val = iotPayload.Val
+			prop.ValStamp = iotPayload.Timestamp
+		} else {
+			//	prop.ValString
+		}
+
+		// forward to the old iotSvc
+		// Thuis
+		// iotSvc.payload<setVal&2&20&1
+		if prop.PropId == 20 || prop.PropId == 21 {
+
+			payload := fmt.Sprintf("setVal&%d&%d&%d", prop.NodeId, prop.PropId, iotPayload.Val)
+			// fmt.Printf("setval: %s>%s\n", iotConfig.IotSvcOld, payload)
+
+			iot.Send(&raspbian3, payload)
+
+			// checkError(errr)
+
+			return fmt.Sprintf(`{"retcode":0,"message":"varId %d handled by iotOld"}`, iotPayload.VarId)
+		}
+
+	case "R":
+		return fmt.Sprintf(`{"retcode":0,"message":"cmd %s no need for localCommand"}`, iotPayload.Cmd)
+
+	default:
+		return fmt.Sprintf(`{"retcode":99,"message":"cmd %s not found"}`, iotPayload.Cmd)
+	}
+
+	return fmt.Sprintf(`{"retcode":0,"message":"cmd %s"}`, iotPayload.Cmd)
+}
+
+func commandAndRespond(iotPayload *iot.IotPayload, conn net.Conn) {
+
+	switch iotPayload.Cmd {
+
+	case "mvcdata":
+		mvcData(conn, iotPayload)
+
+	default:
+		conn.Write([]byte(command(iotPayload)))
+	}
+
 }
 
 func mvcData(conn net.Conn, iotPayload *iot.IotPayload) {
@@ -1409,6 +1477,12 @@ func mvcData(conn net.Conn, iotPayload *iot.IotPayload) {
 
 	} else if iotPayload.Parms[1] == "nodeLocal" || iotPayload.Parms[1] == "localNode" {
 		mvcDataNode(conn, false, iotPayload)
+
+	} else {
+		fmt.Printf("mvcData: skip %v ", iotPayload.Parms)
+		conn.Write(
+			[]byte(
+				fmt.Sprintf(`{"retcode":0,"message":"command: skip %v"}`, iotPayload.Parms)))
 
 	}
 }
@@ -1501,7 +1575,10 @@ func mvcDataGlobal(conn net.Conn) {
 
 		background := "Red" //
 
-		if node.Timestamp == 0 {
+		if node.NodeId == 2 {
+			background = "green"
+
+		} else if node.Timestamp == 0 {
 			background = "Cyan"
 
 		} else if node.Timestamp >= time.Now().Unix()-60 {
@@ -1643,31 +1720,6 @@ func propMvc3(conn net.Conn, prop *iot.IotProp, global bool) {
 		}
 	}
 }
-
-// func iotCommand(conn net.Conn, cmd string) (string, error) {
-
-// 	//TODO check how 0x00 is handled
-
-// 	var err error
-// 	buff := make([]byte, 10)
-
-// 	c := bufio.NewReader(conn)
-
-// 	// fmt.Printf("iotCmd req> %s\n", cmd)
-
-// 	_, err = conn.Write([]byte(cmd + "\r"))
-
-// 	if err != nil {
-
-// 		return string(buff), err
-// 	}
-
-// 	bufff, _, errr := c.ReadLine()
-
-// 	// fmt.Printf("iotCmd resp> %s\n", cmd)
-// 	return string(bufff), errr
-
-// }
 
 func connect(service string) (net.Conn, error) {
 
