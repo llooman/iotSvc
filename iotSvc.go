@@ -19,7 +19,6 @@ import (
 	"log"
 	"math"
 	"net"
-	"net/url"
 	"os"
 	"strconv"
 
@@ -152,29 +151,7 @@ func main() {
 		persistNodeMem(nod)
 	}
 
-	mqttUri, err := url.Parse(iotConfig.MqttUri)
-	checkError(err)
-
-	// topic := "node/+/global"
-
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(mqttUri.String())
-	//opts.SetClientID("test-clientID")		// Multiple connections should use different clientID for each connection, or just leave it blank
-	opts.SetKeepAlive(time.Second * time.Duration(60))
-
-	// If lost connection, reconnect again
-	opts.SetConnectionLostHandler(func(client mqtt.Client, e error) {
-		//	logger.Warn(fmt.Sprintf("mqtt conn lost : %v", e))
-		fmt.Sprintf("mqtt conn lost : %v\n", e)
-	})
-
-	// connect to broker
-	mqttClient = mqtt.NewClient(opts)
-	token := mqttClient.Connect()
-	if token.Wait() && token.Error() != nil {
-		fmt.Sprintf("Fail mqtt connect, %v\n", token.Error())
-		// logger.Fatalf("Fail to connect broker, %v",token.Error())
-	}
+	mqttClient = iot.NewMQClient(iotConfig.MqttUri, "iotSvc")
 
 	raspbian3 = iot.IotConn{
 		Service:        iotConfig.IotSvcOld,
@@ -188,8 +165,8 @@ func main() {
 	// _, errr = TestConn(iotSvcConn, "")
 	// checkError(errr)
 
-	go mqListenUp(mqttUri, iotConfig.MqttUp)
-	go mqListenCmd(mqttUri, iotConfig.MqttCmd)
+	go mqListenUp(iotConfig.MqttUp)
+	go mqListenCmd(iotConfig.MqttCmd)
 
 	if runtime.GOOS == "windows" {
 		err = startIotService("localhost:" + iotConfig.Port)
@@ -812,33 +789,12 @@ func getNode(nodeID int) *iot.IotNode {
 
 */
 
-func mqConnect(clientId string, uri *url.URL) mqtt.Client {
-	opts := createClientOptions(clientId, uri)
-	client := mqtt.NewClient(opts)
-	token := client.Connect()
-	for !token.WaitTimeout(3 * time.Second) {
-	}
-	if err := token.Error(); err != nil {
-		log.Fatal(err)
-	}
-	return client
-}
-
-func createClientOptions(clientId string, uri *url.URL) *mqtt.ClientOptions {
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tcp://%s", uri.Host))
-	opts.SetUsername(uri.User.Username())
-	password, _ := uri.User.Password()
-	opts.SetPassword(password)
-	opts.SetClientID(clientId)
-	return opts
-}
-
-func mqListenCmd(uri *url.URL, topic string) {
+func mqListenCmd(topic string) {
 
 	fmt.Printf("listen: %s  \n", topic)
 
-	client := mqConnect("iotCmd", uri)
+	// client := mqConnect("iotCmd", uri)
+	client := iot.NewMQClient(iotConfig.MqttUri, "iotCmd")
 
 	client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
 
@@ -855,11 +811,12 @@ func mqListenCmd(uri *url.URL, topic string) {
 	})
 }
 
-func mqListenUp(uri *url.URL, topic string) {
+func mqListenUp(topic string) {
 
 	fmt.Printf("listen: %s  \n", topic)
 
-	client := mqConnect("iotUp", uri)
+	// client := mqConnect("iotUp", uri)
+	client := iot.NewMQClient(iotConfig.MqttUri, "iotUp")
 
 	client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
 
@@ -1399,11 +1356,26 @@ func down(iotPayload *iot.IotPayload) {
 func localCommand(iotPayload *iot.IotPayload) string {
 
 	// fmt.Printf("localCommand: %v\n", iotPayload)
+	// forward to the old iotSvc
 
 	switch iotPayload.Cmd {
 
 	case "S":
 		prop := prop(iotPayload.VarId) // test exist ???
+
+		// Thuis
+		// iotSvc.payload<setVal&2&20&1
+		// if prop.PropId == 20 || prop.PropId == 21 {
+
+		payload := fmt.Sprintf("setVal&%d&%d&%d", prop.NodeId, prop.PropId, iotPayload.Val)
+		// fmt.Printf("setval: %s>%s\n", iotConfig.IotSvcOld, payload)
+
+		iot.Send(&raspbian3, payload)
+
+		// checkError(errr)
+
+		// 	return fmt.Sprintf(`{"retcode":0,"message":"varId %d handled by iotOld"}`, iotPayload.VarId)
+		// }
 
 		if prop.Val == iotPayload.Val &&
 			prop.ValStamp == iotPayload.Timestamp &&
@@ -1424,24 +1396,14 @@ func localCommand(iotPayload *iot.IotPayload) string {
 		prop.IsNew = false
 		if prop.Decimals >= 0 {
 			prop.Val = iotPayload.Val
-			prop.ValStamp = iotPayload.Timestamp
+			if iotPayload.Timestamp > 0 {
+				prop.ValStamp = iotPayload.Timestamp
+			} else {
+				prop.ValStamp = time.Now().Unix()
+			}
+
 		} else {
 			//	prop.ValString
-		}
-
-		// forward to the old iotSvc
-		// Thuis
-		// iotSvc.payload<setVal&2&20&1
-		if prop.PropId == 20 || prop.PropId == 21 {
-
-			payload := fmt.Sprintf("setVal&%d&%d&%d", prop.NodeId, prop.PropId, iotPayload.Val)
-			// fmt.Printf("setval: %s>%s\n", iotConfig.IotSvcOld, payload)
-
-			iot.Send(&raspbian3, payload)
-
-			// checkError(errr)
-
-			return fmt.Sprintf(`{"retcode":0,"message":"varId %d handled by iotOld"}`, iotPayload.VarId)
 		}
 
 	case "R":
