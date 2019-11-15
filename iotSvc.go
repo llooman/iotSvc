@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"log"
@@ -58,8 +59,6 @@ var chint *iot.IotNode
 var test *iot.IotNode
 var afzuiging *iot.IotNode
 
-var mqttClient mqtt.Client
-
 type IotConfig struct {
 	Port      string
 	MqttUp    string
@@ -69,13 +68,13 @@ type IotConfig struct {
 	Database  string
 	Database2 string
 	IotSvcOld string
+	MqttUri3b string
 }
 
 var raspbian3 iot.IotConn
-
 var iotConfig IotConfig
-
-// var iotSvcConn net.Conn
+var mqttClient mqtt.Client
+var mqttClient3b mqtt.Client
 
 func init() {
 
@@ -152,6 +151,7 @@ func main() {
 	}
 
 	mqttClient = iot.NewMQClient(iotConfig.MqttUri, "iotSvc")
+	mqttClient3b = iot.NewMQClient(iotConfig.MqttUri3b, "iotSvc")
 
 	raspbian3 = iot.IotConn{
 		Service:        iotConfig.IotSvcOld,
@@ -179,7 +179,7 @@ func main() {
 	// scanner := bufio.NewScanner(os.Stdin)
 
 	fmt.Printf("in Service mode\n")
-	fmt.Print("iot: ")
+	// fmt.Print("iot: ")
 
 	for true {
 
@@ -925,6 +925,8 @@ func mqListenUp(topic string) {
 
 			persistPropMem(prop)
 
+			mvcUp(prop)
+
 		} else if iotPayload.Cmd == "e" || iotPayload.Cmd == "E" {
 
 			prop := prop(iotPayload.VarId)
@@ -945,6 +947,36 @@ func mqListenUp(topic string) {
 
 		}
 	})
+}
+
+func mvcUp(prop *iot.IotProp) {
+
+	if prop.GlobalMvc {
+		topic := fmt.Sprintf(`node/%d/global`, prop.NodeId)
+		payload := fmt.Sprintf(`{"mvcupload":{"p%d_%d":{"v":%d,"r":1}}}`, prop.NodeId, prop.PropId, prop.Val)
+		// fmt.Printf("pub %s [%s]\n", payload, topic)
+
+		token := mqttClient3b.Publish(topic, byte(0), false, payload)
+		if token.Wait() && token.Error() != nil {
+			fmt.Printf("error %s [%s]\n", payload, topic)
+			fmt.Printf("Fail to publish, %v", token.Error())
+		}
+	}
+
+	if prop.GlobalMvc ||
+		prop.LocalMvc {
+
+		topic := fmt.Sprintf(`node/%d/local`, prop.NodeId)
+		payload := fmt.Sprintf(`{"mvcupload":{"p%d":{"v":%d,"r":1}}}`, prop.PropId, prop.Val)
+		// fmt.Printf("pub %s [%s]\n", payload, topic)
+
+		token := mqttClient3b.Publish(topic, byte(0), false, payload)
+		if token.Wait() && token.Error() != nil {
+			fmt.Printf("error %s [%s]\n", payload, topic)
+			fmt.Printf("Fail to publish, %v", token.Error())
+		}
+	}
+
 }
 
 func appendLogItem(prop *iot.IotProp, newVal int64, timeStamp int64) bool {
@@ -1202,8 +1234,6 @@ func propId(varId int) int {
 	return varId % iot.IDFactor
 }
 
-//target.SetReadDeadline(time.Now().Add(49 * time.Second))
-
 //----------------------------------------------------------------------------------------
 
 func startIotService(service string) error {
@@ -1250,11 +1280,20 @@ func handleIotServiceRequest(conn net.Conn) {
 	fmt.Println("new iotSvc conn:")
 
 	buff := make([]byte, 1024)
+	// TODO
+	// var reqBuff bytes.Buffer
 
 	var payload string
 	var iotPayload iot.IotPayload
 	var svcLoop = "startServiceLoop"
 	var nulByte = make([]byte, 0)
+
+	clientAddr := conn.RemoteAddr().String()
+	mqClientID := fmt.Sprintf("iotClnt%s", clientAddr[strings.Index(clientAddr, ":")+1:len(clientAddr)])
+	mqClient := iot.NewMQClient(iotConfig.MqttUri3b, mqClientID)
+	subscription := ""
+
+	// fmt.Printf("iotClientID:%s\n", mqClientID)
 
 	defer conn.Close() // close connection before exit
 
@@ -1270,7 +1309,7 @@ func handleIotServiceRequest(conn net.Conn) {
 				return
 			}
 
-			fmt.Printf("iot read err:%v\n", err.Error())
+			fmt.Printf("iotSvc readErr:%v\n", err.Error())
 			return
 		}
 
@@ -1286,8 +1325,229 @@ func handleIotServiceRequest(conn net.Conn) {
 			svcLoop = "stop"
 			conn.Write(nulByte)
 
+		case "subscribe":
+
+			// implement subscribe to
+			// how to re-use conn ???
+			topic := iotPayload.Parms[1]
+
+			fmt.Printf("%s>%s\n", iotPayload.Cmd, topic)
+
+			mqSubscribe(mqClient, topic, conn, subscription)
+			// mqClient.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
+
+			// 	mqPayload := string(msg.Payload())
+			// 	fmt.Printf("%s[%s]\n", mqPayload, topic)
+
+			// 	// fmt.Printf("* cmd %s VarId %d ConnId %d Val %d Timestamp %d\n", iotPayload.Cmd, iotPayload.VarId, iotPayload.ConnId, iotPayload.Val, iotPayload.Timestamp)
+
+			// 	conn.Write([]byte(mqPayload + "\n"))
+			// })
+			conn.Write(nulByte)
+
 		default:
 			commandAndRespond(&iotPayload, conn)
+
+			if iotPayload.Cmd == "mvcdata" {
+
+				topic := `node/+/global`
+
+				if iotPayload.Parms[1] == "nodeLocal" ||
+					iotPayload.Parms[1] == "localNode" {
+
+					topic = fmt.Sprintf(`node/%d/#`, iotPayload.NodeId)
+
+				}
+
+				//fmt.Printf("%s:topic[%s]\n", iotPayload.Cmd, topic)
+
+				mqSubscribe(mqClient, topic, conn, subscription)
+				subscription = topic
+
+			}
+		}
+	}
+}
+
+func mqSubscribe(client mqtt.Client, topic string, conn net.Conn, prevTopic string) {
+
+	if topic == prevTopic {
+		return
+	}
+
+	if len(prevTopic) > 0 {
+
+		if token := client.Unsubscribe(prevTopic); token.Wait() && token.Error() != nil {
+			fmt.Println(token.Error())
+			os.Exit(1)
+		}
+		// fmt.Printf("Unsubscribe [%s] \n", prevTopic)
+	}
+
+	// fmt.Printf("client.IsConnected:%t \n", client.IsConnected())
+
+	// if token := client.Subscribe(topic, 0, func(clnt mqtt.Client, msg mqtt.Message) {
+
+	// 	mqPayload := string(msg.Payload())
+
+	// 	fmt.Printf("%s[%s]\n", mqPayload, topic)
+
+	// 	conn.Write([]byte(mqPayload + "\n"))
+
+	// }); token.Wait() && token.Error() != nil {
+	// 	fmt.Println(token.Error())
+	// 	os.Exit(1)
+	// }
+
+	token := client.Subscribe(topic, 0, func(clnt mqtt.Client, msg mqtt.Message) {
+
+		mqPayload := string(msg.Payload())
+
+		// fmt.Printf("%s[%s]\n", mqPayload, topic)
+
+		conn.Write([]byte(mqPayload + "\n"))
+	})
+
+	if token.Error() != nil {
+		fmt.Println(token.Error())
+		// fmt.Printf("Subscribe.err %s:topic[%s]\n", token.Error(), topic)s
+	}
+
+	// fmt.Printf("Subscribe [%s] \n", topic)
+}
+
+func commandAndRespond(iotPayload *iot.IotPayload, conn net.Conn) {
+
+	// https://gobyexample.com/channels
+	// https://medium.com/learning-the-go-programming-language/streaming-io-in-go-d93507931185
+
+	var respBuff bytes.Buffer
+
+	switch iotPayload.Cmd {
+
+	case "mvcdata":
+
+		mvcData(&respBuff, iotPayload)
+
+	default:
+		respBuff.Write(
+			[]byte(
+				command(iotPayload)))
+	}
+
+	//fmt.Printf("commandAndRespond: %s", respBuff.String())
+
+	conn.Write(respBuff.Bytes())
+}
+
+func mvcData(respBuff *bytes.Buffer, iotPayload *iot.IotPayload) {
+
+	fmt.Printf("mvcData %s\n", iotPayload.Parms[1])
+
+	if iotPayload.Parms[1] == "global" {
+		mvcDataGlobal(respBuff)
+
+	} else if iotPayload.Parms[1] == "node" || iotPayload.Parms[1] == "nodeGlobal" {
+		mvcDataNode(respBuff, true, iotPayload)
+
+	} else if iotPayload.Parms[1] == "nodeLocal" || iotPayload.Parms[1] == "localNode" {
+		mvcDataNode(respBuff, false, iotPayload)
+
+	} else {
+		fmt.Printf("mvcData: skip %v ", iotPayload.Parms)
+		respBuff.Write(
+			[]byte(
+				fmt.Sprintf(`{"retcode":0,"message":"command: skip %v"}`, iotPayload.Parms)))
+
+	}
+}
+func mvcDataGlobal(respBuff *bytes.Buffer) {
+	// var err error
+
+	respBuff.Write([]byte(fmt.Sprintf(`{"mvcdata3":{"log_From":["%d"]`, 0)))
+
+	// mvc3(conn, "s2__10", "0", 0)
+	propMvc3(respBuff, getProp(2, 10), true)
+
+	for nodeId, node := range nodes {
+
+		background := "Red" //
+
+		if node.NodeId == 2 {
+			background = "green"
+
+		} else if node.Timestamp == 0 {
+			background = "Cyan"
+
+		} else if node.Timestamp >= time.Now().Unix()-60 {
+			background = "green"
+
+		} else if node.Timestamp >= time.Now().Unix()-120 {
+			background = "yellow"
+		}
+		respBuff.Write([]byte(fmt.Sprintf(`,"n%d":["%d",%d,"%s"]`, nodeId, nodeId, 0, background)))
+
+		// fmt.Println("k:", nodeId, "v:", node)
+	}
+
+	for _, prop := range props {
+		if prop.GlobalMvc {
+			//fmt.Println("mvcDataGlobal varID:", varID, "prop:", prop)
+
+			propMvc3(respBuff, prop, true)
+
+		}
+	}
+
+	respBuff.Write([]byte("}}"))
+
+	// conn.Write([]byte(fmt.Sprintf(`],"count":%d,"start":%d,"stop":%d,"stopval":%d}`, cnt, startTimestamp, timestamp, val)))
+
+	// fmt.Printf(`timedata: ],"count":%d,"start":%d,"stop":%d,"stopval":%d}\n\n`, cnt, startTimestamp, timestamp, val)
+
+	respBuff.Write([]byte("\n"))
+}
+
+func propMvc3(respBuff *bytes.Buffer, prop *iot.IotProp, global bool) {
+
+	if !prop.IsNew {
+
+		recent := 01 // 2 oranje, 3 rood
+
+		if prop.RefreshRate > 0 {
+			recent = 3
+
+			if prop.ValStamp >= time.Now().Unix()-int64(2*prop.RefreshRate) {
+				recent = 1
+
+			} else if prop.ValStamp >= time.Now().Unix()-int64(3*prop.RefreshRate) {
+				recent = 2
+			}
+		}
+
+		if prop.Decimals == 0 {
+			if global {
+				respBuff.Write([]byte(fmt.Sprintf(`,"p%d_%d":[%d,%d]`, prop.NodeId, prop.PropId, prop.Val, recent)))
+			} else {
+				respBuff.Write([]byte(fmt.Sprintf(`,"p%d":[%d,%d]`, prop.PropId, prop.Val, recent)))
+			}
+
+		} else if prop.Decimals == 1 || prop.Decimals == 2 || prop.Decimals == 3 {
+
+			factor := math.Pow10(prop.Decimals)
+
+			if global {
+				respBuff.Write([]byte(fmt.Sprintf(`,"p%d_%d":[%.1f,%d]`, prop.NodeId, prop.PropId, float64(prop.Val)/factor, recent)))
+			} else {
+				respBuff.Write([]byte(fmt.Sprintf(`,"p%d":[%.1f,%d]`, prop.PropId, float64(prop.Val)/factor, recent)))
+			}
+
+		} else {
+			if global {
+				respBuff.Write([]byte(fmt.Sprintf(`,"p%d_%d":[%d,%d]`, prop.NodeId, prop.PropId, prop.Val, recent)))
+			} else {
+				respBuff.Write([]byte(fmt.Sprintf(`,"p%d":[%d,%d]`, prop.PropId, prop.Val, recent)))
+			}
 		}
 	}
 }
@@ -1301,11 +1561,13 @@ func command(iotPayload *iot.IotPayload) string {
 	case "ping":
 		fmt.Printf("pong\n")
 		if iotPayload.IsJson {
+			// writer.Write([]byte(fmt.Sprintf(`{"retcode":0,"message":"pong"}`))
 			return fmt.Sprintf(`{"retcode":0,"message":"pong"}`)
 		} else {
+			// writer.Write([]byte(fmt.Sprintf(`pong`))
 			return fmt.Sprintf(`pong`)
 		}
-
+		// writer.Write([]byte(
 	case "active", "sample", "s02", "s50", "led", "sensors", "mvcNode", "mvcSensor":
 		//logger.info("------------- active 2="+parm2+" 3="+parm3+"  --------------" );
 		// active = parm1.equalsIgnoreCase("true");
@@ -1416,40 +1678,27 @@ func localCommand(iotPayload *iot.IotPayload) string {
 	return fmt.Sprintf(`{"retcode":0,"message":"cmd %s"}`, iotPayload.Cmd)
 }
 
-func commandAndRespond(iotPayload *iot.IotPayload, conn net.Conn) {
+// func mvcDataOBS(conn net.Conn, iotPayload *iot.IotPayload) {
 
-	switch iotPayload.Cmd {
+// 	if iotPayload.Parms[1] == "global" {
+// 		mvcDataGlobalOBS(conn)
 
-	case "mvcdata":
-		mvcData(conn, iotPayload)
+// 	} else if iotPayload.Parms[1] == "node" || iotPayload.Parms[1] == "nodeGlobal" {
+// 		mvcDataNode(conn, true, iotPayload)
 
-	default:
-		conn.Write([]byte(command(iotPayload)))
-	}
+// 	} else if iotPayload.Parms[1] == "nodeLocal" || iotPayload.Parms[1] == "localNode" {
+// 		mvcDataNode(conn, false, iotPayload)
 
-}
+// 	} else {
+// 		fmt.Printf("mvcData: skip %v ", iotPayload.Parms)
+// 		conn.Write(
+// 			[]byte(
+// 				fmt.Sprintf(`{"retcode":0,"message":"command: skip %v"}`, iotPayload.Parms)))
 
-func mvcData(conn net.Conn, iotPayload *iot.IotPayload) {
+// 	}
+// }
 
-	if iotPayload.Parms[1] == "global" {
-		mvcDataGlobal(conn)
-
-	} else if iotPayload.Parms[1] == "node" || iotPayload.Parms[1] == "nodeGlobal" {
-		mvcDataNode(conn, true, iotPayload)
-
-	} else if iotPayload.Parms[1] == "nodeLocal" || iotPayload.Parms[1] == "localNode" {
-		mvcDataNode(conn, false, iotPayload)
-
-	} else {
-		fmt.Printf("mvcData: skip %v ", iotPayload.Parms)
-		conn.Write(
-			[]byte(
-				fmt.Sprintf(`{"retcode":0,"message":"command: skip %v"}`, iotPayload.Parms)))
-
-	}
-}
-
-func mvcDataNode(conn net.Conn, global bool, iotPayload *iot.IotPayload) {
+func mvcDataNode(writer *bytes.Buffer, global bool, iotPayload *iot.IotPayload) {
 
 	// ,"up":{"v":"166:43"},"last":{"v":"0:0:3"},"active":{"v":1},
 	// 		socketOut.print (",\"active\":{\"v\":"+((active)?1:0)+"}");
@@ -1457,34 +1706,34 @@ func mvcDataNode(conn net.Conn, global bool, iotPayload *iot.IotPayload) {
 	node := getNode(iotPayload.NodeId)
 
 	fmt.Printf("mvcDataNode.nodeId:%d\n", iotPayload.NodeId)
-	conn.Write([]byte(fmt.Sprintf(`{"mvcdata3":{"id":["%d"]`, iotPayload.NodeId)))
+	writer.Write([]byte(fmt.Sprintf(`{"mvcdata3":{"id":["%d"]`, iotPayload.NodeId)))
 
-	conn.Write([]byte(fmt.Sprintf(`,"caption":["%s"]`, node.Name)))
-	conn.Write([]byte(fmt.Sprintf(`,"html":["%s"]`, node.Name)))
+	writer.Write([]byte(fmt.Sprintf(`,"caption":["%s"]`, node.Name)))
+	writer.Write([]byte(fmt.Sprintf(`,"html":["%s"]`, node.Name)))
 
 	if node.Timestamp > 0 {
 		// diff := now().Sub(node.Timestamp)
 		duration := time.Now().Sub(time.Unix(node.Timestamp, 0))
-		conn.Write([]byte(fmt.Sprintf(`,"last":["%s"]`, iot.FmtMMSS(duration))))
+		writer.Write([]byte(fmt.Sprintf(`,"last":["%s"]`, iot.FmtMMSS(duration))))
 	}
 
 	for _, prop := range props {
 
 		if prop.NodeId == iotPayload.NodeId {
-			propMvc3(conn, prop, global)
+			propMvc3(writer, prop, global)
 		}
 		// fmt.Println("k:", nodeId, "v:", node)
 	}
 
 	if iotPayload.NodeId == 7 {
-		mvcP1(conn, global, iotPayload)
+		mvcP1(writer, global, iotPayload)
 
 	} else if iotPayload.NodeId == 8 {
 
 	}
 
-	conn.Write([]byte("}}"))
-	conn.Write([]byte("\n"))
+	writer.Write([]byte("}}"))
+	writer.Write([]byte("\n"))
 
 	// 		 socketOut.print (",\"retCode\":{\"v\":0"+"}");
 	// //			 if(open) socketOut.print("}");
@@ -1495,7 +1744,7 @@ func mvcDataNode(conn net.Conn, global bool, iotPayload *iot.IotPayload) {
 
 }
 
-func mvcP1(conn net.Conn, global bool, iotPayload *iot.IotPayload) {
+func mvcP1(writer *bytes.Buffer, global bool, iotPayload *iot.IotPayload) {
 
 	// String strIp="?:?:?:?";
 	// long ip = s9.ist;
@@ -1518,109 +1767,109 @@ func mvcP1(conn net.Conn, global bool, iotPayload *iot.IotPayload) {
 
 }
 
-func mvcKetel(conn net.Conn, global bool, iotPayload *iot.IotPayload) {
+func mvcKetel(writer *bytes.Buffer, global bool, iotPayload *iot.IotPayload) {
 
 	// socketOut.print (",\"xtrVWTijd\":{\"v\":"+domo.verw.onPeriode+"}");
 	// socketOut.print (",\"xtrVWPauze\":{\"v\":"+domo.verw.offPeriode+"}");
 
 }
 
-func mvcDataGlobal(conn net.Conn) {
-	// var err error
+// func mvcDataGlobalOBS(conn net.Conn) {
+// 	// var err error
 
-	conn.Write([]byte(fmt.Sprintf(`{"mvcdata3":{"log_From":["%d"]`, 0)))
+// 	conn.Write([]byte(fmt.Sprintf(`{"mvcdata3":{"log_From":["%d"]`, 0)))
 
-	// mvc3(conn, "s2__10", "0", 0)
-	propMvc3(conn, getProp(2, 10), true)
+// 	// mvc3(conn, "s2__10", "0", 0)
+// 	propMvc3(conn, getProp(2, 10), true)
 
-	for nodeId, node := range nodes {
+// 	for nodeId, node := range nodes {
 
-		background := "Red" //
+// 		background := "Red" //
 
-		if node.NodeId == 2 {
-			background = "green"
+// 		if node.NodeId == 2 {
+// 			background = "green"
 
-		} else if node.Timestamp == 0 {
-			background = "Cyan"
+// 		} else if node.Timestamp == 0 {
+// 			background = "Cyan"
 
-		} else if node.Timestamp >= time.Now().Unix()-60 {
-			background = "green"
+// 		} else if node.Timestamp >= time.Now().Unix()-60 {
+// 			background = "green"
 
-		} else if node.Timestamp >= time.Now().Unix()-120 {
-			background = "yellow"
-		}
-		conn.Write([]byte(fmt.Sprintf(`,"n%d":["%d",%d,"%s"]`, nodeId, nodeId, 0, background)))
+// 		} else if node.Timestamp >= time.Now().Unix()-120 {
+// 			background = "yellow"
+// 		}
+// 		conn.Write([]byte(fmt.Sprintf(`,"n%d":["%d",%d,"%s"]`, nodeId, nodeId, 0, background)))
 
-		// fmt.Println("k:", nodeId, "v:", node)
-	}
+// 		// fmt.Println("k:", nodeId, "v:", node)
+// 	}
 
-	for _, prop := range props {
-		if prop.GlobalMvc {
-			//fmt.Println("mvcDataGlobal varID:", varID, "prop:", prop)
+// 	for _, prop := range props {
+// 		if prop.GlobalMvc {
+// 			//fmt.Println("mvcDataGlobal varID:", varID, "prop:", prop)
 
-			propMvc3(conn, prop, true)
+// 			propMvc3(conn, prop, true)
 
-		}
-	}
+// 		}
+// 	}
 
-	// propMvc3(conn, getProp(4, 52), true) // dim level
-	// propMvc3(conn, getProp(4, 52), true) // dim level
-	// propMvc3(conn, getProp(4, 52), true) // dim level
-	// propMvc3(conn, getProp(3, 13), true) // pomp
-	// propMvc3(conn, getProp(3, 20), true) // aanvoer
-	// propMvc3(conn, getProp(3, 11), true) // retour
-	// propMvc3(conn, getProp(3, 12), true) // ruimte
-	// propMvc3(conn, getProp(3, 14), true) // muurin
-	// propMvc3(conn, getProp(3, 15), true) // afvoer
-	// propMvc3(conn, getProp(3, 16), true) // keuken
+// 	// propMvc3(conn, getProp(4, 52), true) // dim level
+// 	// propMvc3(conn, getProp(4, 52), true) // dim level
+// 	// propMvc3(conn, getProp(4, 52), true) // dim level
+// 	// propMvc3(conn, getProp(3, 13), true) // pomp
+// 	// propMvc3(conn, getProp(3, 20), true) // aanvoer
+// 	// propMvc3(conn, getProp(3, 11), true) // retour
+// 	// propMvc3(conn, getProp(3, 12), true) // ruimte
+// 	// propMvc3(conn, getProp(3, 14), true) // muurin
+// 	// propMvc3(conn, getProp(3, 15), true) // afvoer
+// 	// propMvc3(conn, getProp(3, 16), true) // keuken
 
-	// propMvc3(conn, getProp(4, 52), true) // dim level
-	// propMvc3(conn, getProp(4, 11), true) // Vin
+// 	// propMvc3(conn, getProp(4, 52), true) // dim level
+// 	// propMvc3(conn, getProp(4, 11), true) // Vin
 
-	// propMvc3(conn, getProp(2, 20), true) // thuis
-	// propMvc3(conn, getProp(2, 21), true) // vak
-	// propMvc3(conn, getProp(2, 22), true) // testBtn
-	// propMvc3(conn, getProp(2, 30), true) // TimerMode minutes or seconds
+// 	// propMvc3(conn, getProp(2, 20), true) // thuis
+// 	// propMvc3(conn, getProp(2, 21), true) // vak
+// 	// propMvc3(conn, getProp(2, 22), true) // testBtn
+// 	// propMvc3(conn, getProp(2, 30), true) // TimerMode minutes or seconds
 
-	// propMvc3(conn, getProp(11, 12), true) // Kamer temp
+// 	// propMvc3(conn, getProp(11, 12), true) // Kamer temp
 
-	// socketOut.print (",\"s2_33\":{\"v\":\""+iotSrv.timerMessage()+"\",\"r\":1}");
+// 	// socketOut.print (",\"s2_33\":{\"v\":\""+iotSrv.timerMessage()+"\",\"r\":1}");
 
-	// if(verw.active())
-	// {
-	// 	socketOut.print (",\"vwAan\":{\"v\":"+verw.onPeriode+",\"r\":1}");
-	// 	socketOut.print (",\"vwUit\":{\"v\":"+verw.offPeriode+",\"r\":1}");
-	// }
-	// else
-	// {
-	// 	socketOut.print (",\"vwAan\":{\"v\":\"OFF\",\"r\":1}");
-	// 	socketOut.print (",\"vwUit\":{\"v\":\"\",\"r\":1}");
-	// }
+// 	// if(verw.active())
+// 	// {
+// 	// 	socketOut.print (",\"vwAan\":{\"v\":"+verw.onPeriode+",\"r\":1}");
+// 	// 	socketOut.print (",\"vwUit\":{\"v\":"+verw.offPeriode+",\"r\":1}");
+// 	// }
+// 	// else
+// 	// {
+// 	// 	socketOut.print (",\"vwAan\":{\"v\":\"OFF\",\"r\":1}");
+// 	// 	socketOut.print (",\"vwUit\":{\"v\":\"\",\"r\":1}");
+// 	// }
 
-	// propMvc3(conn, getProp(5, 24), true) // RetBad
-	// propMvc3(conn, getProp(5, 25), true) // RetRechts
-	// propMvc3(conn, getProp(5, 26), true) // RetLinks
-	// propMvc3(conn, getProp(5, 41), true) // CVTemp
-	// propMvc3(conn, getProp(5, 52), true) // thermostaat
+// 	// propMvc3(conn, getProp(5, 24), true) // RetBad
+// 	// propMvc3(conn, getProp(5, 25), true) // RetRechts
+// 	// propMvc3(conn, getProp(5, 26), true) // RetLinks
+// 	// propMvc3(conn, getProp(5, 41), true) // CVTemp
+// 	// propMvc3(conn, getProp(5, 52), true) // thermostaat
 
-	// propMvc3(conn, getProp(8, 11), true) // temp
-	// propMvc3(conn, getProp(8, 54), true) // ssrTemp
-	// propMvc3(conn, getProp(8, 55), true) // ssrPower
-	// propMvc3(conn, getProp(8, 54), true) // total
+// 	// propMvc3(conn, getProp(8, 11), true) // temp
+// 	// propMvc3(conn, getProp(8, 54), true) // ssrTemp
+// 	// propMvc3(conn, getProp(8, 55), true) // ssrPower
+// 	// propMvc3(conn, getProp(8, 54), true) // total
 
-	// propMvc3(conn, getProp(14, 54), true) // total
-	// propMvc3(conn, getProp(14, 55), true) // today
-	// propMvc3(conn, getProp(14, 56), true) // power
-	// propMvc3(conn, getProp(14, 57), true) // CVTemp
+// 	// propMvc3(conn, getProp(14, 54), true) // total
+// 	// propMvc3(conn, getProp(14, 55), true) // today
+// 	// propMvc3(conn, getProp(14, 56), true) // power
+// 	// propMvc3(conn, getProp(14, 57), true) // CVTemp
 
-	conn.Write([]byte("}}"))
+// 	conn.Write([]byte("}}"))
 
-	// conn.Write([]byte(fmt.Sprintf(`],"count":%d,"start":%d,"stop":%d,"stopval":%d}`, cnt, startTimestamp, timestamp, val)))
+// 	// conn.Write([]byte(fmt.Sprintf(`],"count":%d,"start":%d,"stop":%d,"stopval":%d}`, cnt, startTimestamp, timestamp, val)))
 
-	// fmt.Printf(`timedata: ],"count":%d,"start":%d,"stop":%d,"stopval":%d}\n\n`, cnt, startTimestamp, timestamp, val)
+// 	// fmt.Printf(`timedata: ],"count":%d,"start":%d,"stop":%d,"stopval":%d}\n\n`, cnt, startTimestamp, timestamp, val)
 
-	conn.Write([]byte("\n"))
-}
+// 	conn.Write([]byte("\n"))
+// }
 
 func propMvc(conn net.Conn, nodeId int, propId int) {
 
@@ -1639,7 +1888,7 @@ func mvc3(conn net.Conn, name string, val string, recent int) {
 	}
 }
 
-func propMvc3(conn net.Conn, prop *iot.IotProp, global bool) {
+func propMvc3OBS(conn net.Conn, prop *iot.IotProp, global bool) {
 
 	if !prop.IsNew {
 
@@ -1703,91 +1952,5 @@ func checkError(err error) {
 		fmt.Printf("err: " + err.Error())
 		fmt.Fprintf(os.Stderr, "iot Fatal error: %s", err.Error())
 		os.Exit(1)
-	}
-}
-
-//------------------------------------
-func startForwardService(port string, target net.Conn) error {
-
-	forwardListener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("forwardListener :" + port + "\r")
-
-	go serviceForwardListener(forwardListener, target)
-
-	return err
-}
-
-func serviceForwardListener(listener net.Listener, target net.Conn) {
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			continue
-		}
-
-		// multi threading:
-		go handleForwardClient(conn, target)
-	}
-}
-
-func handleForwardClient(conn net.Conn, target net.Conn) {
-
-	fmt.Printf("handleForwardClient\r")
-
-	go forward("fwdUp", conn, target)
-
-	go forward("fwdDown", target, conn)
-}
-
-func forward(id string, source net.Conn, target net.Conn) {
-
-	var char byte
-	var err error
-
-	defer source.Close() // close connection before exit
-
-	c := bufio.NewReader(source)
-	t := bufio.NewWriter(target)
-
-	timeoutDuration := 3 * time.Second
-
-	for {
-
-		//source.SetReadDeadline(time.Now().Add(timeoutDuration))
-		char, err = c.ReadByte()
-
-		if err == nil {
-
-			//fmt.Printf("%s < %x-%c\r", id, char, char )
-
-			err = t.WriteByte(char)
-
-			if err != nil {
-				fmt.Printf("forward write err %s\n", err.Error())
-				return
-			}
-
-			if char == 0x0d || char == 0x0a || c.Buffered() >= c.Size() {
-
-				if c.Buffered() >= c.Size() {
-					fmt.Printf("%s flush %d\n", id, t.Buffered())
-				}
-
-				target.SetWriteDeadline(time.Now().Add(timeoutDuration))
-				t.Flush()
-
-				// calc new deadline
-
-			}
-
-		} else {
-
-			fmt.Printf("forward read err %s\n", err.Error())
-			return
-		}
 	}
 }
