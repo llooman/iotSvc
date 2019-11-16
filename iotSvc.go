@@ -951,9 +951,16 @@ func mqListenUp(topic string) {
 
 func mvcUp(prop *iot.IotProp) {
 
+	var buff bytes.Buffer
+	// {"mvcup":{"p7_35":[0,1]}}
+	// {"mvcupload":{"p7_22":{"v":684620,"r":1}}}
+
 	if prop.GlobalMvc {
 		topic := fmt.Sprintf(`node/%d/global`, prop.NodeId)
-		payload := fmt.Sprintf(`{"mvcupload":{"p%d_%d":{"v":%d,"r":1}}}`, prop.NodeId, prop.PropId, prop.Val)
+		propMvc3(&buff, prop, true)
+		payload := fmt.Sprintf(`{"mvcup":{%s}}`, buff.String())
+
+		// payload := fmt.Sprintf(`{"mvcupload":{"p%d_%d":{"v":%d,"r":1}}}`, prop.NodeId, prop.PropId, prop.Val)
 		// fmt.Printf("pub %s [%s]\n", payload, topic)
 
 		token := mqttClient3b.Publish(topic, byte(0), false, payload)
@@ -967,7 +974,11 @@ func mvcUp(prop *iot.IotProp) {
 		prop.LocalMvc {
 
 		topic := fmt.Sprintf(`node/%d/local`, prop.NodeId)
-		payload := fmt.Sprintf(`{"mvcupload":{"p%d":{"v":%d,"r":1}}}`, prop.PropId, prop.Val)
+		buff.Reset()
+		propMvc3(&buff, prop, false)
+		payload := fmt.Sprintf(`{"mvcup":{%s}}`, buff.String())
+
+		// payload := fmt.Sprintf(`{"mvcupload":{"p%d":{"v":%d,"r":1}}}`, prop.PropId, prop.Val)
 		// fmt.Printf("pub %s [%s]\n", payload, topic)
 
 		token := mqttClient3b.Publish(topic, byte(0), false, payload)
@@ -1293,7 +1304,7 @@ func handleIotServiceRequest(conn net.Conn) {
 	mqClient := iot.NewMQClient(iotConfig.MqttUri3b, mqClientID)
 	subscription := ""
 
-	// fmt.Printf("iotClientID:%s\n", mqClientID)
+	fmt.Printf("iotClientID:%s\n", mqClientID)
 
 	defer conn.Close() // close connection before exit
 
@@ -1401,11 +1412,11 @@ func mqSubscribe(client mqtt.Client, topic string, conn net.Conn, prevTopic stri
 
 	token := client.Subscribe(topic, 0, func(clnt mqtt.Client, msg mqtt.Message) {
 
-		mqPayload := string(msg.Payload())
+		mqPayload := string(msg.Payload()) + "\n"
 
 		// fmt.Printf("%s[%s]\n", mqPayload, topic)
 
-		conn.Write([]byte(mqPayload + "\n"))
+		conn.Write([]byte(mqPayload))
 	})
 
 	if token.Error() != nil {
@@ -1510,6 +1521,12 @@ func mvcDataGlobal(respBuff *bytes.Buffer) {
 
 func propMvc3(respBuff *bytes.Buffer, prop *iot.IotProp, global bool) {
 
+	empty := respBuff.Len() < 1
+	comma := ","
+	if empty {
+		comma = ""
+	}
+
 	if !prop.IsNew {
 
 		recent := 01 // 2 oranje, 3 rood
@@ -1527,9 +1544,9 @@ func propMvc3(respBuff *bytes.Buffer, prop *iot.IotProp, global bool) {
 
 		if prop.Decimals == 0 {
 			if global {
-				respBuff.Write([]byte(fmt.Sprintf(`,"p%d_%d":[%d,%d]`, prop.NodeId, prop.PropId, prop.Val, recent)))
+				respBuff.Write([]byte(fmt.Sprintf(`%s"p%d_%d":[%d,%d]`, comma, prop.NodeId, prop.PropId, prop.Val, recent)))
 			} else {
-				respBuff.Write([]byte(fmt.Sprintf(`,"p%d":[%d,%d]`, prop.PropId, prop.Val, recent)))
+				respBuff.Write([]byte(fmt.Sprintf(`%s"p%d":[%d,%d]`, comma, prop.PropId, prop.Val, recent)))
 			}
 
 		} else if prop.Decimals == 1 || prop.Decimals == 2 || prop.Decimals == 3 {
@@ -1537,16 +1554,16 @@ func propMvc3(respBuff *bytes.Buffer, prop *iot.IotProp, global bool) {
 			factor := math.Pow10(prop.Decimals)
 
 			if global {
-				respBuff.Write([]byte(fmt.Sprintf(`,"p%d_%d":[%.1f,%d]`, prop.NodeId, prop.PropId, float64(prop.Val)/factor, recent)))
+				respBuff.Write([]byte(fmt.Sprintf(`%s"p%d_%d":[%.1f,%d]`, comma, prop.NodeId, prop.PropId, float64(prop.Val)/factor, recent)))
 			} else {
-				respBuff.Write([]byte(fmt.Sprintf(`,"p%d":[%.1f,%d]`, prop.PropId, float64(prop.Val)/factor, recent)))
+				respBuff.Write([]byte(fmt.Sprintf(`%s"p%d":[%.1f,%d]`, comma, prop.PropId, float64(prop.Val)/factor, recent)))
 			}
 
 		} else {
 			if global {
-				respBuff.Write([]byte(fmt.Sprintf(`,"p%d_%d":[%d,%d]`, prop.NodeId, prop.PropId, prop.Val, recent)))
+				respBuff.Write([]byte(fmt.Sprintf(`%s"p%d_%d":[%d,%d]`, comma, prop.NodeId, prop.PropId, prop.Val, recent)))
 			} else {
-				respBuff.Write([]byte(fmt.Sprintf(`,"p%d":[%d,%d]`, prop.PropId, prop.Val, recent)))
+				respBuff.Write([]byte(fmt.Sprintf(`%s"p%d":[%d,%d]`, comma, prop.PropId, prop.Val, recent)))
 			}
 		}
 	}
