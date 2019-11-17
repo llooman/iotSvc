@@ -17,6 +17,8 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"net"
@@ -38,9 +40,6 @@ import (
 	"iot"
 )
 
-var props map[int]*iot.IotProp
-var nodes map[int]*iot.IotNode
-
 var wwwRoot string
 
 // var iotSvc string
@@ -59,6 +58,11 @@ var chint *iot.IotNode
 var test *iot.IotNode
 var afzuiging *iot.IotNode
 
+type GraphPlan struct {
+	Name string
+	ID   int
+}
+
 type IotConfig struct {
 	Port      string
 	MqttUp    string
@@ -69,6 +73,7 @@ type IotConfig struct {
 	Database2 string
 	IotSvcOld string
 	MqttUri3b string
+	Debug     bool
 }
 
 var raspbian3 iot.IotConn
@@ -76,21 +81,45 @@ var iotConfig IotConfig
 var mqttClient mqtt.Client
 var mqttClient3b mqtt.Client
 
+var props map[int]*iot.IotProp
+var nodes map[int]*iot.IotNode
+
+var graphPlansMap map[string]*GraphPlan
+
+var (
+	Detail  *log.Logger
+	Trace   *log.Logger
+	Info    *log.Logger
+	Warning *log.Logger
+	Error   *log.Logger
+)
+
 func init() {
 
 }
 
 func main() {
 
+	// err := gonfig.GetConf(iot.Config(), &iotConfig)
+	// if err != nil {
+	// 	fmt.Printf("Config %s not found\n", iot.Config())
+	// }
+
+	InitLogging(ioutil.Discard, os.Stdout, os.Stdout, os.Stderr)
+
 	err := gonfig.GetConf(iot.Config(), &iotConfig)
-	if err != nil {
-		fmt.Printf("Config %s not found\n", iot.Config())
+	checkError(err)
+
+	if iotConfig.Debug {
+		InitLogging(os.Stdout, os.Stdout, os.Stdout, os.Stderr)
+		Trace.Print("Debug ...")
 	}
 
 	// fmt.Printf("MqttCmd:%s \n", iotConfig.MqttCmd)
 
 	nodes = make(map[int]*iot.IotNode)
 	props = make(map[int]*iot.IotProp)
+	graphPlansMap = make(map[string]*GraphPlan)
 
 	database, err = sql.Open("mysql", iotConfig.Database)
 	checkError(err)
@@ -136,6 +165,9 @@ func main() {
 	loadPropsFromDB()
 	loadPropValuesFromDB("iotvaluesdisk")
 	loadPropValuesFromDB("iotvaluesmem")
+
+	loadPlansFromDB()
+	//persistPlans()
 
 	// migration from raspbian3
 	for _, prp := range props {
@@ -243,6 +275,90 @@ func main() {
 	}
 
 	fmt.Printf("webstop\n")
+}
+
+func loadPlansFromDB() {
+
+	var err error
+
+	stmt, errr := database.Prepare(`Select name, id from graphplans where not name is null and not id is null`)
+	checkError(errr)
+
+	defer stmt.Close()
+
+	rows, errr := stmt.Query()
+	if errr != nil {
+		log.Fatal(err)
+	}
+
+	defer rows.Close()
+
+	id := 0
+	var name string
+
+	for rows.Next() {
+		err := rows.Scan(&name, &id)
+		checkError(err)
+
+		key := strconv.Itoa(id) + name
+
+		if _, ok := graphPlansMap[key]; !ok {
+			graphPlansMap[key] = &GraphPlan{
+				Name: name,
+				ID:   id,
+			}
+		}
+		fmt.Printf("graphPlan:%#v\n", graphPlansMap[key])
+	}
+
+	if err = rows.Err(); err != nil {
+		log.Fatal(err)
+	}
+
+	err = rows.Close()
+	checkError(err)
+
+	if errr := rows.Err(); errr != nil {
+		checkError(errr)
+	}
+
+	err = stmt.Close()
+	checkError(err)
+}
+
+func persistPlans() {
+
+	// migration from raspbian3
+	for _, prp := range props {
+		// fmt.Println("k:", k, "v:%v", prp)
+		persistPropDef(prp)
+		persistPropMem(prp)
+	}
+
+	for _, graphPlan := range graphPlansMap {
+		// fmt.Println("k:", k, "v:%v", prp)
+
+		persist, err := database2.Prepare(`
+		INSERT INTO graphplans( id, 
+			name  ) VALUES(?, ? ) 
+		ON DUPLICATE KEY UPDATE id=?, 
+			name=? `)
+		if err != nil {
+			fmt.Printf("persistPlans: %v", err.Error())
+		}
+
+		defer persist.Close()
+
+		_, err = persist.Exec(
+			graphPlan.ID,
+			graphPlan.Name,
+			graphPlan.ID,
+			graphPlan.Name)
+
+		if err != nil {
+			fmt.Printf("persistPlans: %v", err.Error())
+		}
+	}
 }
 
 func loadPropValuesFromDB(table string) {
@@ -1338,22 +1454,11 @@ func handleIotServiceRequest(conn net.Conn) {
 
 		case "subscribe":
 
-			// implement subscribe to
-			// how to re-use conn ???
 			topic := iotPayload.Parms[1]
 
 			fmt.Printf("%s>%s\n", iotPayload.Cmd, topic)
-
 			mqSubscribe(mqClient, topic, conn, subscription)
-			// mqClient.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
-
-			// 	mqPayload := string(msg.Payload())
-			// 	fmt.Printf("%s[%s]\n", mqPayload, topic)
-
-			// 	// fmt.Printf("* cmd %s VarId %d ConnId %d Val %d Timestamp %d\n", iotPayload.Cmd, iotPayload.VarId, iotPayload.ConnId, iotPayload.Val, iotPayload.Timestamp)
-
-			// 	conn.Write([]byte(mqPayload + "\n"))
-			// })
+			// ??? gaat het goed om alleen een nulByte terug te sturen???
 			conn.Write(nulByte)
 
 		default:
@@ -1472,6 +1577,7 @@ func mvcData(respBuff *bytes.Buffer, iotPayload *iot.IotPayload) {
 
 	}
 }
+
 func mvcDataGlobal(respBuff *bytes.Buffer) {
 	// var err error
 
@@ -1576,15 +1682,16 @@ func command(iotPayload *iot.IotPayload) string {
 	switch iotPayload.Cmd {
 
 	case "ping":
-		fmt.Printf("pong\n")
-		if iotPayload.IsJson {
-			// writer.Write([]byte(fmt.Sprintf(`{"retcode":0,"message":"pong"}`))
-			return fmt.Sprintf(`{"retcode":0,"message":"pong"}`)
-		} else {
-			// writer.Write([]byte(fmt.Sprintf(`pong`))
-			return fmt.Sprintf(`pong`)
-		}
+		// fmt.Printf("pong\n")
+		// if iotPayload.IsJson {
+		// 	// writer.Write([]byte(fmt.Sprintf(`{"retcode":0,"message":"pong"}`))
+		// 	return fmt.Sprintf(`{"retcode":0,"message":"pong"}`)
+		// } else {
+		// 	// writer.Write([]byte(fmt.Sprintf(`pong`))
+		// 	return fmt.Sprintf(`pong`)
+		// }
 		// writer.Write([]byte(
+		return ""
 	case "active", "sample", "s02", "s50", "led", "sensors", "mvcNode", "mvcSensor":
 		//logger.info("------------- active 2="+parm2+" 3="+parm3+"  --------------" );
 		// active = parm1.equalsIgnoreCase("true");
@@ -1695,26 +1802,6 @@ func localCommand(iotPayload *iot.IotPayload) string {
 	return fmt.Sprintf(`{"retcode":0,"message":"cmd %s"}`, iotPayload.Cmd)
 }
 
-// func mvcDataOBS(conn net.Conn, iotPayload *iot.IotPayload) {
-
-// 	if iotPayload.Parms[1] == "global" {
-// 		mvcDataGlobalOBS(conn)
-
-// 	} else if iotPayload.Parms[1] == "node" || iotPayload.Parms[1] == "nodeGlobal" {
-// 		mvcDataNode(conn, true, iotPayload)
-
-// 	} else if iotPayload.Parms[1] == "nodeLocal" || iotPayload.Parms[1] == "localNode" {
-// 		mvcDataNode(conn, false, iotPayload)
-
-// 	} else {
-// 		fmt.Printf("mvcData: skip %v ", iotPayload.Parms)
-// 		conn.Write(
-// 			[]byte(
-// 				fmt.Sprintf(`{"retcode":0,"message":"command: skip %v"}`, iotPayload.Parms)))
-
-// 	}
-// }
-
 func mvcDataNode(writer *bytes.Buffer, global bool, iotPayload *iot.IotPayload) {
 
 	// ,"up":{"v":"166:43"},"last":{"v":"0:0:3"},"active":{"v":1},
@@ -1790,103 +1877,6 @@ func mvcKetel(writer *bytes.Buffer, global bool, iotPayload *iot.IotPayload) {
 	// socketOut.print (",\"xtrVWPauze\":{\"v\":"+domo.verw.offPeriode+"}");
 
 }
-
-// func mvcDataGlobalOBS(conn net.Conn) {
-// 	// var err error
-
-// 	conn.Write([]byte(fmt.Sprintf(`{"mvcdata3":{"log_From":["%d"]`, 0)))
-
-// 	// mvc3(conn, "s2__10", "0", 0)
-// 	propMvc3(conn, getProp(2, 10), true)
-
-// 	for nodeId, node := range nodes {
-
-// 		background := "Red" //
-
-// 		if node.NodeId == 2 {
-// 			background = "green"
-
-// 		} else if node.Timestamp == 0 {
-// 			background = "Cyan"
-
-// 		} else if node.Timestamp >= time.Now().Unix()-60 {
-// 			background = "green"
-
-// 		} else if node.Timestamp >= time.Now().Unix()-120 {
-// 			background = "yellow"
-// 		}
-// 		conn.Write([]byte(fmt.Sprintf(`,"n%d":["%d",%d,"%s"]`, nodeId, nodeId, 0, background)))
-
-// 		// fmt.Println("k:", nodeId, "v:", node)
-// 	}
-
-// 	for _, prop := range props {
-// 		if prop.GlobalMvc {
-// 			//fmt.Println("mvcDataGlobal varID:", varID, "prop:", prop)
-
-// 			propMvc3(conn, prop, true)
-
-// 		}
-// 	}
-
-// 	// propMvc3(conn, getProp(4, 52), true) // dim level
-// 	// propMvc3(conn, getProp(4, 52), true) // dim level
-// 	// propMvc3(conn, getProp(4, 52), true) // dim level
-// 	// propMvc3(conn, getProp(3, 13), true) // pomp
-// 	// propMvc3(conn, getProp(3, 20), true) // aanvoer
-// 	// propMvc3(conn, getProp(3, 11), true) // retour
-// 	// propMvc3(conn, getProp(3, 12), true) // ruimte
-// 	// propMvc3(conn, getProp(3, 14), true) // muurin
-// 	// propMvc3(conn, getProp(3, 15), true) // afvoer
-// 	// propMvc3(conn, getProp(3, 16), true) // keuken
-
-// 	// propMvc3(conn, getProp(4, 52), true) // dim level
-// 	// propMvc3(conn, getProp(4, 11), true) // Vin
-
-// 	// propMvc3(conn, getProp(2, 20), true) // thuis
-// 	// propMvc3(conn, getProp(2, 21), true) // vak
-// 	// propMvc3(conn, getProp(2, 22), true) // testBtn
-// 	// propMvc3(conn, getProp(2, 30), true) // TimerMode minutes or seconds
-
-// 	// propMvc3(conn, getProp(11, 12), true) // Kamer temp
-
-// 	// socketOut.print (",\"s2_33\":{\"v\":\""+iotSrv.timerMessage()+"\",\"r\":1}");
-
-// 	// if(verw.active())
-// 	// {
-// 	// 	socketOut.print (",\"vwAan\":{\"v\":"+verw.onPeriode+",\"r\":1}");
-// 	// 	socketOut.print (",\"vwUit\":{\"v\":"+verw.offPeriode+",\"r\":1}");
-// 	// }
-// 	// else
-// 	// {
-// 	// 	socketOut.print (",\"vwAan\":{\"v\":\"OFF\",\"r\":1}");
-// 	// 	socketOut.print (",\"vwUit\":{\"v\":\"\",\"r\":1}");
-// 	// }
-
-// 	// propMvc3(conn, getProp(5, 24), true) // RetBad
-// 	// propMvc3(conn, getProp(5, 25), true) // RetRechts
-// 	// propMvc3(conn, getProp(5, 26), true) // RetLinks
-// 	// propMvc3(conn, getProp(5, 41), true) // CVTemp
-// 	// propMvc3(conn, getProp(5, 52), true) // thermostaat
-
-// 	// propMvc3(conn, getProp(8, 11), true) // temp
-// 	// propMvc3(conn, getProp(8, 54), true) // ssrTemp
-// 	// propMvc3(conn, getProp(8, 55), true) // ssrPower
-// 	// propMvc3(conn, getProp(8, 54), true) // total
-
-// 	// propMvc3(conn, getProp(14, 54), true) // total
-// 	// propMvc3(conn, getProp(14, 55), true) // today
-// 	// propMvc3(conn, getProp(14, 56), true) // power
-// 	// propMvc3(conn, getProp(14, 57), true) // CVTemp
-
-// 	conn.Write([]byte("}}"))
-
-// 	// conn.Write([]byte(fmt.Sprintf(`],"count":%d,"start":%d,"stop":%d,"stopval":%d}`, cnt, startTimestamp, timestamp, val)))
-
-// 	// fmt.Printf(`timedata: ],"count":%d,"start":%d,"stop":%d,"stopval":%d}\n\n`, cnt, startTimestamp, timestamp, val)
-
-// 	conn.Write([]byte("\n"))
-// }
 
 func propMvc(conn net.Conn, nodeId int, propId int) {
 
@@ -1966,8 +1956,34 @@ func connect(service string) (net.Conn, error) {
 
 func checkError(err error) {
 	if err != nil {
-		fmt.Printf("err: " + err.Error())
-		fmt.Fprintf(os.Stderr, "iot Fatal error: %s", err.Error())
-		os.Exit(1)
+		Error.Println(err)
 	}
+}
+
+func InitLogging(
+	traceHandle io.Writer,
+	infoHandle io.Writer,
+	warningHandle io.Writer,
+	errorHandle io.Writer) {
+
+	Detail = log.New(traceHandle,
+		"",
+		0)
+
+	Trace = log.New(traceHandle,
+		"",
+		log.Ltime)
+
+	Info = log.New(infoHandle,
+		"",
+		log.Ltime)
+
+	Warning = log.New(warningHandle,
+		"w)",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
+	Error = log.New(errorHandle,
+		"e)",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
 }
