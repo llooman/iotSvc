@@ -74,6 +74,8 @@ type IotConfig struct {
 	IotSvcOld string
 	MqttUri3b string
 	Debug     bool
+	Logfile   string
+	ServerId  string
 }
 
 var raspbian3 iot.IotConn
@@ -100,35 +102,44 @@ func init() {
 
 func main() {
 
-	// err := gonfig.GetConf(iot.Config(), &iotConfig)
-	// if err != nil {
-	// 	fmt.Printf("Config %s not found\n", iot.Config())
-	// }
-
-	InitLogging(ioutil.Discard, os.Stdout, os.Stdout, os.Stderr)
+	fmt.Printf("... ")
 
 	err := gonfig.GetConf(iot.Config(), &iotConfig)
 	checkError(err)
+
+	// logFile, err := os.OpenFile(iotConfig.Logfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	// if err != nil {
+	// 	log.Fatalf("error opening file: %v", err)
+	// }
+
+	// defer logFile.Close()
+
+	// fmt.Printf("%s ...\n", iotConfig.Logfile)
+
+	InitLogging(ioutil.Discard, os.Stdout, os.Stdout, os.Stderr)
 
 	if iotConfig.Debug {
 		InitLogging(os.Stdout, os.Stdout, os.Stdout, os.Stderr)
 		Trace.Print("Debug ...")
 	}
 
+	// log.SetOutput(logFile)
+
+	// Info.Print("1...")
 	// fmt.Printf("MqttCmd:%s \n", iotConfig.MqttCmd)
 
 	nodes = make(map[int]*iot.IotNode)
 	props = make(map[int]*iot.IotProp)
 	graphPlansMap = make(map[string]*GraphPlan)
-
+	// Info.Print("12..")
 	database, err = sql.Open("mysql", iotConfig.Database)
 	checkError(err)
 	defer database.Close()
-
+	// Info.Print("123.")
 	database2, err = sql.Open("mysql", iotConfig.Database2)
 	checkError(err)
 	defer database2.Close()
-
+	// Info.Print("1234")
 	pomp = getNode(3)
 	dimmer = getNode(4)
 	ketel = getNode(5)
@@ -165,9 +176,9 @@ func main() {
 	loadPropsFromDB()
 	loadPropValuesFromDB("iotvaluesdisk")
 	loadPropValuesFromDB("iotvaluesmem")
-
+	// Info.Print("2...")
 	loadPlansFromDB()
-	//persistPlans()
+	persistPlans()
 
 	// migration from raspbian3
 	for _, prp := range props {
@@ -181,9 +192,9 @@ func main() {
 		persistNodeDef(nod)
 		persistNodeMem(nod)
 	}
-
-	mqttClient = iot.NewMQClient(iotConfig.MqttUri, "iotSvc")
-	mqttClient3b = iot.NewMQClient(iotConfig.MqttUri3b, "iotSvc")
+	// Info.Print("3...")
+	mqttClient = iot.NewMQClient(iotConfig.MqttUri, iotConfig.ServerId+"iotSvc")
+	mqttClient3b = iot.NewMQClient(iotConfig.MqttUri3b, iotConfig.ServerId+"iotSvc")
 
 	raspbian3 = iot.IotConn{
 		Service:        iotConfig.IotSvcOld,
@@ -196,22 +207,28 @@ func main() {
 
 	// _, errr = TestConn(iotSvcConn, "")
 	// checkError(errr)
-
+	// Info.Print("4...")
 	go mqListenUp(iotConfig.MqttUp)
 	go mqListenCmd(iotConfig.MqttCmd)
 
+	// if runtime.GOOS == "windows" {
+	// 	err = startIotService("localhost:" + iotConfig.Port)
+	// } else {
+	// 	err = startIotService("0.0.0.0:" + iotConfig.Port)
+	// }
+	// checkError(err)
+
+	service := "0.0.0.0:" + iotConfig.Port
 	if runtime.GOOS == "windows" {
-		err = startIotService("localhost:" + iotConfig.Port)
-	} else {
-		err = startIotService("0.0.0.0:" + iotConfig.Port)
+		service = "localhost:" + iotConfig.Port
 	}
+	err = startIotService(service)
 	checkError(err)
+
+	Info.Printf("%s started", service)
 
 	reader := bufio.NewReader(os.Stdin)
 	// scanner := bufio.NewScanner(os.Stdin)
-
-	fmt.Printf("in Service mode\n")
-	// fmt.Print("iot: ")
 
 	for true {
 
@@ -910,7 +927,7 @@ func mqListenCmd(topic string) {
 	fmt.Printf("listen: %s  \n", topic)
 
 	// client := mqConnect("iotCmd", uri)
-	client := iot.NewMQClient(iotConfig.MqttUri, "iotCmd")
+	client := iot.NewMQClient(iotConfig.MqttUri, iotConfig.ServerId+"iotCmd")
 
 	client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
 
@@ -932,11 +949,13 @@ func mqListenUp(topic string) {
 	fmt.Printf("listen: %s  \n", topic)
 
 	// client := mqConnect("iotUp", uri)
-	client := iot.NewMQClient(iotConfig.MqttUri, "iotUp")
+	client := iot.NewMQClient(iotConfig.MqttUri, iotConfig.ServerId+"iotUp")
 
 	client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
 
 		var payload = string(msg.Payload())
+
+		Trace.Printf("Up [%s]%s\n", topic, payload)
 		//fmt.Printf("[%s]>%s", topic, payload)
 
 		iotPayload := iot.ToPayload(payload)
@@ -1417,10 +1436,10 @@ func handleIotServiceRequest(conn net.Conn) {
 
 	clientAddr := conn.RemoteAddr().String()
 	mqClientID := fmt.Sprintf("iotClnt%s", clientAddr[strings.Index(clientAddr, ":")+1:len(clientAddr)])
-	mqClient := iot.NewMQClient(iotConfig.MqttUri3b, mqClientID)
-	subscription := ""
 
-	fmt.Printf("iotClientID:%s\n", mqClientID)
+	Trace.Printf("mqMvcClient:%s\n", mqClientID)
+	mqClient := iot.NewMQClient(iotConfig.MqttUri3b, iotConfig.ServerId+mqClientID)
+	subscription := ""
 
 	defer conn.Close() // close connection before exit
 
