@@ -26,7 +26,7 @@ import (
 	"strconv"
 
 	// "path"
-	"bufio"
+
 	"runtime"
 	"strings"
 	"time"
@@ -227,68 +227,68 @@ func main() {
 
 	Info.Printf("%s started", service)
 
-	reader := bufio.NewReader(os.Stdin)
+	// reader := bufio.NewReader(os.Stdin)
 	// scanner := bufio.NewScanner(os.Stdin)
 
 	for true {
 
 		// os.Stdin.SetReadDeadline(time.Now().Add(7 * time.Second)) // 49
 
-		text, _, errr := reader.ReadLine()
+		// text, _, errr := reader.ReadLine()
 
-		// time.Sleep(3 * time.Second) //49
+		time.Sleep(49 * time.Second) //49
 		// fmt.Print(time.Now())
 		// fmt.Println(": " + text)
 
-		if errr != nil {
+		// if errr != nil {
 
-			err = database.Ping()
+		err = database.Ping()
 
-			fmt.Print(time.Now())
-			fmt.Println(" ping")
+		// fmt.Print(time.Now())
+		// fmt.Println(" ping")
 
-			// checkError(err)
-			if err != nil {
-				fmt.Printf("database.Ping() err: " + err.Error())
-				fmt.Fprintf(os.Stderr, "iot: Fatal error: %s", err.Error())
-				os.Exit(1)
-			}
-
-			err = database2.Ping()
-
-			fmt.Print(time.Now())
-			fmt.Println(" ping2")
-
-			// checkError(err)
-			if err != nil {
-				fmt.Printf("database2.Ping() err: " + err.Error())
-				fmt.Fprintf(os.Stderr, "iot: Fatal error: %s", err.Error())
-				os.Exit(1)
-			}
-
-		} else {
-
-			text = text
-
-			// resp, _ := iotCommand(myClient, "mvcdata&localNode&3\n")
-			// fmt.Printf("respons: %s", resp)
-
-			// resp = resp
-			// for scanner.Scan() {
-			// 	fmt.Print(time.Now())
-			// 	fmt.Println(scanner.Text())
-			// }
-
-			for k, v := range props {
-				fmt.Println("k:", k, "v:", v)
-			}
-
-			// for k, v := range nodes {
-			// 	fmt.Println("k:", k, "v:", v)
-			// }
-
-			fmt.Print("\niot: ")
+		// checkError(err)
+		if err != nil {
+			fmt.Printf("database.Ping() err: " + err.Error())
+			fmt.Fprintf(os.Stderr, "iot: Fatal error: %s", err.Error())
+			os.Exit(1)
 		}
+
+		err = database2.Ping()
+
+		// fmt.Print(time.Now())
+		// fmt.Println(" ping2")
+
+		// checkError(err)
+		if err != nil {
+			fmt.Printf("database2.Ping() err: " + err.Error())
+			fmt.Fprintf(os.Stderr, "iot: Fatal error: %s", err.Error())
+			os.Exit(1)
+		}
+
+		// } else {
+
+		// 	text = text
+
+		// 	// resp, _ := iotCommand(myClient, "mvcdata&localNode&3\n")
+		// 	// fmt.Printf("respons: %s", resp)
+
+		// 	// resp = resp
+		// 	// for scanner.Scan() {
+		// 	// 	fmt.Print(time.Now())
+		// 	// 	fmt.Println(scanner.Text())
+		// 	// }
+
+		// 	for k, v := range props {
+		// 		fmt.Println("k:", k, "v:", v)
+		// 	}
+
+		// 	// for k, v := range nodes {
+		// 	// 	fmt.Println("k:", k, "v:", v)
+		// 	// }
+
+		// 	fmt.Print("\niot: ")
+		// }
 	}
 
 	fmt.Printf("webstop\n")
@@ -1976,6 +1976,13 @@ func connect(service string) (net.Conn, error) {
 func checkError(err error) {
 	if err != nil {
 		Error.Println(err)
+	}
+}
+func checkError2(err error) {
+	if err != nil {
+		fmt.Printf("err: " + err.Error())
+		fmt.Fprintf(os.Stderr, "iot Fatal error: %s", err.Error())
+		os.Exit(1)
 	}
 }
 
