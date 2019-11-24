@@ -1,4 +1,4 @@
-/*   xxxx
+/*   xxxx  xxxx
 
 	{"cmd":"mvcdata","type":"global"}
 	{"cmd":"timedata"}
@@ -9,6 +9,10 @@
 	https://en.wikipedia.org/wiki/Time_series
 	dataPoints
 	timePoints
+
+	var reqBuff bytes.Buffer
+	reqBuff.WriteByte(char)
+	io.Copy(res, buf) // reads from buf, writes to res
 */
 
 package main
