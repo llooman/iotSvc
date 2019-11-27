@@ -1,18 +1,18 @@
 /*   xxxx  xxxx
 
-	{"cmd":"mvcdata","type":"global"}
-	{"cmd":"timedata"}
-	{"cmd":"timedataDiff"}
+{"cmd":"mvcdata","type":"global"}
+{"cmd":"timedata"}
+{"cmd":"timedataDiff"}
 
-	0.0.0.0 tcp4 = IPv4 wildcard address
+0.0.0.0 tcp4 = IPv4 wildcard address
 
-	https://en.wikipedia.org/wiki/Time_series
-	dataPoints
-	timePoints
+https://en.wikipedia.org/wiki/Time_series
+dataPoints
+timePoints
 
-	var reqBuff bytes.Buffer
-	reqBuff.WriteByte(char)
-	io.Copy(res, buf) // reads from buf, writes to res
+var reqBuff bytes.Buffer
+reqBuff.WriteByte(char)
+io.Copy(res, buf) // reads from buf, writes to res
 */
 
 package main
@@ -29,6 +29,9 @@ import (
 	"os"
 	"strconv"
 
+	"iot"
+	// "iot/svc/verw"
+
 	// "path"
 
 	"runtime"
@@ -40,8 +43,6 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 
 	_ "github.com/go-sql-driver/mysql"
-
-	"iot"
 )
 
 var wwwRoot string
@@ -108,6 +109,8 @@ func main() {
 
 	fmt.Printf("... ")
 
+	// verw.Setup()
+
 	err := gonfig.GetConf(iot.Config(), &iotConfig)
 	checkError(err)
 
@@ -144,6 +147,7 @@ func main() {
 	checkError(err)
 	defer database2.Close()
 	// Info.Print("1234")
+
 	pomp = getNode(3)
 	dimmer = getNode(4)
 	ketel = getNode(5)
@@ -214,6 +218,9 @@ func main() {
 	// Info.Print("4...")
 	go mqListenUp(iotConfig.MqttUp)
 	go mqListenCmd(iotConfig.MqttCmd)
+
+	initVerw()
+	go verwarming()
 
 	// if runtime.GOOS == "windows" {
 	// 	err = startIotService("localhost:" + iotConfig.Port)
@@ -298,402 +305,6 @@ func main() {
 	fmt.Printf("webstop\n")
 }
 
-func loadPlansFromDB() {
-
-	var err error
-
-	stmt, errr := database.Prepare(`Select name, id from graphplans where not name is null and not id is null`)
-	checkError(errr)
-
-	defer stmt.Close()
-
-	rows, errr := stmt.Query()
-	if errr != nil {
-		log.Fatal(err)
-	}
-
-	defer rows.Close()
-
-	id := 0
-	var name string
-
-	for rows.Next() {
-		err := rows.Scan(&name, &id)
-		checkError(err)
-
-		key := strconv.Itoa(id) + name
-
-		if _, ok := graphPlansMap[key]; !ok {
-			graphPlansMap[key] = &GraphPlan{
-				Name: name,
-				ID:   id,
-			}
-		}
-		fmt.Printf("graphPlan:%#v\n", graphPlansMap[key])
-	}
-
-	if err = rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	err = rows.Close()
-	checkError(err)
-
-	if errr := rows.Err(); errr != nil {
-		checkError(errr)
-	}
-
-	err = stmt.Close()
-	checkError(err)
-}
-
-func persistPlans() {
-
-	// migration from raspbian3
-	for _, prp := range props {
-		// fmt.Println("k:", k, "v:%v", prp)
-		persistPropDef(prp)
-		persistPropMem(prp)
-	}
-
-	for _, graphPlan := range graphPlansMap {
-		// fmt.Println("k:", k, "v:%v", prp)
-
-		persist, err := database2.Prepare(`
-		INSERT INTO graphplans( id, 
-			name  ) VALUES(?, ? ) 
-		ON DUPLICATE KEY UPDATE id=?, 
-			name=? `)
-		if err != nil {
-			fmt.Printf("persistPlans: %v", err.Error())
-		}
-
-		defer persist.Close()
-
-		_, err = persist.Exec(
-			graphPlan.ID,
-			graphPlan.Name,
-			graphPlan.ID,
-			graphPlan.Name)
-
-		if err != nil {
-			fmt.Printf("persistPlans: %v", err.Error())
-		}
-	}
-}
-
-func loadPropValuesFromDB(table string) {
-
-	var err error
-
-	stmt, errr := database.Prepare(fmt.Sprintf(`Select id, ist, istTimer, nextRefresh, error, refreshRate, enabled, retryCount from %s`, table))
-	checkError(errr)
-
-	defer stmt.Close()
-
-	rows, errr := stmt.Query()
-	if errr != nil {
-		log.Fatal(err)
-	}
-
-	defer rows.Close()
-
-	varID := 0
-	var ist sql.NullInt64
-	var istTimer sql.NullInt64
-	var nextRefresh sql.NullInt64
-	var error sql.NullInt64       // value or isError
-	var refreshRate sql.NullInt64 // in use??
-	var enabled sql.NullInt64     // in use??
-	var retryCount sql.NullInt64
-
-	for rows.Next() {
-		err := rows.Scan(&varID, &ist, &istTimer, &nextRefresh, &error, &refreshRate, &enabled, &retryCount)
-		checkError(err)
-
-		oldProp := varID % 100
-		oldNode := varID / 100
-
-		prop := getProp(oldNode, oldProp)
-		// prop := prop(varID)
-		iot.SqlInt64(&prop.Val, ist)
-		iot.SqlInt64(&prop.ValStamp, istTimer)
-
-		iot.SqlInt(&prop.RefreshRate, refreshRate)
-		iot.SqlInt64(&prop.NextRefresh, nextRefresh)
-		iot.SqlInt(&prop.RetryCount, retryCount)
-
-		iot.SqlInt64(&prop.Err, error)
-
-		prop.MemDirty = false
-		prop.FromDb = true
-		prop.IsNew = false
-		// SqlInt64(&prop.ErrorTimeStamp, errorTimer)
-	}
-
-	if err = rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	err = rows.Close()
-	checkError(err)
-
-	if errr := rows.Err(); errr != nil {
-		checkError(errr)
-	}
-
-	err = stmt.Close()
-	checkError(err)
-}
-
-func loadPropsFromDB() {
-
-	var err error
-
-	stmt, errr := database.Prepare(`Select id, nodeId, sensId, name, refreshRate, decimalFactor, drawType, drawColor, drawOffset, drawFactor, addOption, trace from iotsensors where nodeId >= 0`)
-	checkError(errr)
-
-	defer stmt.Close()
-
-	rows, errr := stmt.Query()
-	if errr != nil {
-		log.Fatal(err)
-	}
-
-	defer rows.Close()
-
-	nodeID := 0
-	var name string
-	varID := 0
-	propID := 0
-
-	var decimalFactor sql.NullInt64
-	var refreshRate sql.NullInt64
-	var drawType sql.NullInt64
-	var drawColor sql.NullString
-	var drawOffset sql.NullInt64
-	var drawFactor sql.NullFloat64
-	var addOption sql.NullInt64
-	var trace sql.NullInt64
-
-	for rows.Next() {
-		err := rows.Scan(&varID, &nodeID, &propID, &name, &refreshRate, &decimalFactor, &drawType, &drawColor, &drawOffset, &drawFactor, &addOption, &trace)
-		checkError(err)
-
-		// varID2 := nodeID * iot.nodeIdVarIdFactor + propID
-		prop := getProp(nodeID, propID)
-		// prop := prop(varID2)
-		prop.Name = name
-		iot.SqlInt(&prop.RefreshRate, refreshRate)
-		iot.SqlInt(&prop.DrawType, drawType)
-		iot.SqlString(&prop.DrawColor, drawColor)
-		iot.SqlInt(&prop.DrawOffset, drawOffset)
-		iot.SqlFloat32(&prop.DrawFactor, drawFactor)
-		if decimalFactor.Valid {
-			if decimalFactor.Int64 == 10 {
-				prop.Decimals = 1
-			} else if decimalFactor.Int64 == 100 {
-				prop.Decimals = 2
-			} else if decimalFactor.Int64 == 1000 {
-				prop.Decimals = 3
-			} else {
-				prop.Decimals = 0
-			}
-		}
-		//LogOption
-		if addOption.Valid {
-			if addOption.Int64 == 2 {
-				prop.LogOption = 1
-			} else if addOption.Int64 == 3 {
-				prop.LogOption = 2
-			} else {
-				prop.LogOption = 0
-			}
-		}
-
-		if trace.Valid {
-			if addOption.Int64 > 0 {
-				prop.TraceOption = 1
-			} else {
-				prop.TraceOption = 0
-			}
-		}
-
-		// fmt.Printf("prop:%#v", prop)
-	}
-
-	if err = rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	err = rows.Close()
-	checkError(err)
-
-	if errr := rows.Err(); errr != nil {
-		checkError(errr)
-	}
-
-	err = stmt.Close()
-	checkError(err)
-}
-
-func loadNodesFromDB() {
-
-	var err error
-
-	stmt, errr := database.Prepare(`Select nodeId, name from iotnodes where nodeId >= 0`)
-	checkError(errr)
-
-	defer stmt.Close()
-
-	rows, errr := stmt.Query()
-	if errr != nil {
-		log.Fatal(err)
-	}
-
-	defer rows.Close()
-
-	var nodeID = 0
-	var name string
-
-	for rows.Next() {
-		err := rows.Scan(&nodeID, &name)
-		checkError(err)
-
-		node := getNode(nodeID)
-		node.Name = name
-		// fmt.Printf("node:%#v", node)
-	}
-
-	if err = rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	err = rows.Close()
-	checkError(err)
-
-	if errr := rows.Err(); errr != nil {
-		checkError(errr)
-	}
-
-	err = stmt.Close()
-	checkError(err)
-}
-
-func loadNodeValuesFromDB(table string) {
-
-	var err error
-
-	stmt, errr := database.Prepare(fmt.Sprintf(`Select nodeid, connId, boottime, bootcount, timestamp from %s where nodeId >= 0`, table))
-
-	checkError(errr)
-
-	defer stmt.Close()
-
-	rows, errr := stmt.Query()
-	if errr != nil {
-		log.Fatal(err)
-	}
-
-	defer rows.Close()
-
-	nodeID := 0
-	connID := 0
-	var boottime int64
-	bootcount := 0
-	var timestamp int64
-
-	for rows.Next() {
-		err := rows.Scan(&nodeID, &connID, &boottime, &bootcount, &timestamp)
-		checkError(err)
-
-		node := getNode(nodeID)
-		node.ConnId = connID
-		node.BootCount = bootcount
-		node.Timestamp = timestamp
-	}
-
-	if err = rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	err = rows.Close()
-	checkError(err)
-
-	if errr := rows.Err(); errr != nil {
-		checkError(errr)
-	}
-
-	err = stmt.Close()
-	checkError(err)
-}
-
-func getProp(nodeID int, propID int) *iot.IotProp {
-
-	return prop(nodeID*iot.IDFactor + propID)
-}
-
-func prop(varID int) *iot.IotProp {
-
-	//fmt.Printf("prop %d\n", id)
-
-	if prop, ok := props[varID]; ok {
-		return prop
-
-	} else {
-		nodeID := varID / iot.IDFactor
-
-		props[varID] = &iot.IotProp{
-			NodeId:    nodeID,
-			PropId:    varID % iot.IDFactor,
-			VarId:     varID,
-			Node:      getNode(nodeID),
-			Decimals:  0,
-			Name:      "prop" + strconv.Itoa(varID),
-			LocalMvc:  false,
-			GlobalMvc: false,
-			FromDb:    false,
-			IsNew:     true,
-			DefDirty:  true}
-
-		return props[varID]
-	}
-}
-
-func createProp(node *iot.IotNode, propID int, name string, decimals int, refreshRate int, logOpt int, traceOpt int, globalMvc bool) *iot.IotProp {
-
-	varID := propID + node.NodeId*iot.IDFactor
-
-	props[varID] = &iot.IotProp{
-		NodeId:      node.NodeId,
-		PropId:      propID,
-		VarId:       varID,
-		Node:        node,
-		Decimals:    decimals,
-		RefreshRate: refreshRate,
-		LogOption:   logOpt,
-		TraceOption: traceOpt,
-		LocalMvc:    true,
-		GlobalMvc:   globalMvc,
-		Name:        name,
-		FromDb:      false,
-		IsNew:       true,
-		MemDirty:    true,
-		DefDirty:    true}
-
-	if refreshRate > 0 {
-		props[varID].NextRefresh = time.Now().Unix() + int64(refreshRate)
-	}
-
-	return props[varID]
-}
-
-func createTemp(node *iot.IotNode, propID int, name string, logOpt int, globalMvc bool) *iot.IotProp {
-	prop := createProp(node, propID, name, 2, 60, logOpt, 0, globalMvc)
-	prop.LogOption = 2
-	return prop
-}
-
 func getNode(nodeID int) *iot.IotNode {
 
 	//fmt.Printf("getNode %d\n", nodeID)
@@ -701,207 +312,8 @@ func getNode(nodeID int) *iot.IotNode {
 	if node, ok := nodes[nodeID]; ok {
 		return node
 
-	} else if nodeID == 2 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "iot"}
-
-		createProp(nodes[nodeID], 20, "thuis", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 21, "vakantie", 0, 3600, 0, 0, true)
-
-		// pPomp := createProp(nodes[nodeID], 13, "pomp", 0, 60, 1, 0, true)
-		// createTemp(nodes[nodeID], 20, "aanvoer", 2)
-		// createTemp(nodes[nodeID], 11, "retour", 2)
-		// createTemp(nodes[nodeID], 12, "ruimte", 2)
-		// createTemp(nodes[nodeID], 14, "muurin", 2)
-		// createTemp(nodes[nodeID], 15, "afvoer", 2)
-		// createTemp(nodes[nodeID], 16, "keuken", 2)
-
-		// createProp(nodes[nodeID], 52, "refTemp", 1, 3600, 0, 0, true)
-		// createProp(nodes[nodeID], 53, "deltaTemp", 1, 3600, 0, 0, true)
-		// createProp(nodes[nodeID], 54, "duty", 0, 3600, 0, 0, true)
-		// createProp(nodes[nodeID], 55, "dutymin", 0, 3600, 0, 0, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 3 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "pomp"}
-
-		createProp(nodes[nodeID], 13, "pomp", 0, 60, 1, 0, true)
-		createTemp(nodes[nodeID], 20, "aanvoer", 2, true)
-		createTemp(nodes[nodeID], 11, "retour", 2, true)
-		createTemp(nodes[nodeID], 12, "ruimte", 2, true)
-		createTemp(nodes[nodeID], 14, "muurin", 2, true)
-		createTemp(nodes[nodeID], 15, "afvoer", 2, true)
-		createTemp(nodes[nodeID], 16, "keuken", 2, true)
-
-		createProp(nodes[nodeID], 52, "refTemp", 1, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 53, "deltaTemp", 1, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 54, "duty", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 55, "dutymin", 0, 3600, 0, 0, true)
-
-		createProp(nodes[nodeID], 70, "testStr", -1, 3600, 0, 0, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 4 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "dimmer"}
-
-		// dimmer.publishTopic = "main";
-		// dimmer.publishGlobal = true;
-
-		createProp(nodes[nodeID], 52, "dimmer", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 53, "defLevel", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 11, "vin", 1, 60, 0, 0, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 5 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "ketel"}
-
-		createProp(nodes[nodeID], 52, "thermostaat", 0, 60, 1, 0, true)
-		createProp(nodes[nodeID], 53, "thermostaatPeriode", 0, 3600, 0, 0, true)
-		createTemp(nodes[nodeID], 41, "CVTemp", 2, true)
-		createTemp(nodes[nodeID], 24, "RetBad", 2, false)
-		createTemp(nodes[nodeID], 25, "RetRechts", 2, false)
-		createTemp(nodes[nodeID], 26, "RetLinks", 2, false)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 6 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "gas"}
-
-		// createProp(nodes[nodeID], 52, "dimmer", 0, 60, 0, 0, true)
-		// createProp(nodes[nodeID], 53, "defLevel", 0, 3600, 0, 0, true)
-		// createProp(nodes[nodeID], 11, "vin", 1, 60, 0, 0, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 7 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "p1"}
-
-		createProp(nodes[nodeID], 9, "IP", 0, 60, 0, 0, true)       //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 13, "button", 0, 60, 0, 0, true)  //  Bool s13.publishGlobal = false;
-		createProp(nodes[nodeID], 20, "version", 0, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 21, "vbLaag", 3, 60, 1, 0, true)    //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 51, "deltaLaag", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 22, "vbHoog", 3, 60, 1, 0, true)    //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 52, "deltaHoog", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 23, "retLaag", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 24, "retHoog", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 25, "vbGas", 3, 60, 1, 0, true) //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 26, "tarief", 0, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 29, "L1Pow", 3, 60, 0, 0, true)    //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 30, "L1PowNeg", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 31, "L1Curr", 0, 60, 0, 0, true)   //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 32, "L1Volt", 1, 60, 0, 0, true)   //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 33, "L2Pow", 3, 60, 0, 0, true)    //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 34, "L2PowNeg", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 35, "L2Curr", 0, 60, 0, 0, true)   //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 36, "L2Volt", 1, 60, 0, 0, true)   //  LogLong s9.publishGlobal = false;
-
-		createProp(nodes[nodeID], 37, "L3Pow", 3, 60, 0, 0, true)    //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 38, "L3PowNeg", 3, 60, 0, 0, true) //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 39, "L3Curr", 0, 60, 0, 0, true)   //  LogLong s9.publishGlobal = false;
-		createProp(nodes[nodeID], 40, "L3Volt", 1, 60, 0, 0, true)   //  LogLong s9.publishGlobal = false;
-
-		return nodes[nodeID]
-
-	} else if nodeID == 8 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "closeIn"}
-
-		createProp(nodes[nodeID], 55, "ssrPower", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 52, "maxTemp", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 53, "maxSSRTemp", 0, 3600, 0, 0, true)
-
-		createTemp(nodes[nodeID], 11, "temp", 2, true)
-		createTemp(nodes[nodeID], 54, "ssrTemp", 2, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 11 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "serial1"}
-		createProp(nodes[nodeID], 12, "temp", 2, 60, 0, 0, true)
-		return nodes[nodeID]
-
-	} else if nodeID == 14 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "chint"}
-
-		createProp(nodes[nodeID], 54, "total", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 55, "today", 2, 60, 0, 0, true)
-		createProp(nodes[nodeID], 56, "temp", 1, 60, 0, 0, true)
-		createProp(nodes[nodeID], 57, "power", 0, 60, 0, 0, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 15 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "sono"}
-
-		createProp(nodes[nodeID], 9, "IP", 0, 0, 0, 0, true)
-		createProp(nodes[nodeID], 10, "GPIO0", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 12, "relais", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 13, "button", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 15, "s15", 0, 0, 0, 0, true)
-
-		return nodes[nodeID]
-
-	} else if nodeID == 23 {
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "afz"}
-
-		createTemp(nodes[nodeID], 21, "buitenTemp", 2, true) // used by heating control!!
-		createTemp(nodes[nodeID], 22, "douchTemp", 2, true)
-		createTemp(nodes[nodeID], 23, "kraanTemp", 2, true)
-
-		createTemp(nodes[nodeID], 24, "tempBinn", 2, true)          //"C,"
-		createProp(nodes[nodeID], 25, "humBinn", 0, 60, 2, 0, true) //"%,"
-		createProp(nodes[nodeID], 43, "absBinn", 0, 60, 2, 0, true) //"g/m3<br/>"
-
-		createTemp(nodes[nodeID], 40, "tempBui", 2, true)          //"C,"
-		createProp(nodes[nodeID], 41, "humBui", 0, 60, 2, 0, true) //"%,"
-		createProp(nodes[nodeID], 42, "absBui", 0, 60, 2, 0, true) //"g/m3<br/>"
-
-		createProp(nodes[nodeID], 44, "median", 2, 60, 1, 0, true) //"%"
-
-		createProp(nodes[nodeID], 30, "manual", 0, 60, 0, 0, true)
-		createProp(nodes[nodeID], 31, "fan", 0, 60, 1, 0, true)
-		createProp(nodes[nodeID], 32, "maxHum", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 33, "hotHum", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 34, "coldHum", 0, 3600, 0, 0, true)
-		createProp(nodes[nodeID], 35, "deltaHum", 0, 3600, 0, 0, true)
-
-		return nodes[nodeID]
-
 	} else {
-
-		nodes[nodeID] = &iot.IotNode{
-			NodeId: nodeID,
-			Name:   "node" + strconv.Itoa(nodeID)}
+		nodes[nodeID] = newNode(nodeID)
 		return nodes[nodeID]
 	}
 }
